@@ -1,0 +1,192 @@
+/**
+ * knuckles.core.format — tool result and prompt formatting
+ *
+ * Converts tool results and session state into the strings that
+ * get added to the conversation history sent to the model.
+ *
+ * All functions here are pure string transformations — no I/O,
+ * no LLM dependency, fully testable.
+ *
+ * ## Conversation structure
+ *
+ * Each agent turn produces two history entries:
+ *
+ * 1. **user turn** — the tool result, wrapped so the model can
+ *    clearly see what the tool returned and whether it succeeded
+ * 2. **assistant turn** — the model's raw response (stored as-is)
+ *
+ * The system prompt is built once at session start and is not
+ * stored in history — it is prepended on every `buildPrompt` call.
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+
+// --- tool result formatting ---
+
+/**
+ * formats a tool result into a user-turn message for the conversation.
+ *
+ * Success and failure are clearly distinguished so the model can
+ * decide whether to retry, recover, or proceed.
+ */
+@export
+@testWith(
+  [{ ok: true,  tool: "read", output: "val x = 1" }],
+    "<result tool=\"read\" status=\"ok\">\nval x = 1\n</result>",
+  [{ ok: false, tool: "edit", output: "search string not found" }],
+    "<result tool=\"edit\" status=\"error\">\nsearch string not found\n</result>",
+)
+val formatResult = fn(result) {
+  val status = match result.ok { true => "ok" false => "error" }
+  "<result tool=\"" + result.tool + "\" status=\"" + status + "\">\n" +
+  result.output + "\n" +
+  "</result>"
+}
+
+/**
+ * formats the most recent tool result from the session as a user turn.
+ *
+ * Returns `nil` if there are no results yet.
+ */
+@export
+val formatLastResult = fn(session) {
+  match session.results {
+    [] => nil
+    rs => formatResult(rs[-1])
+  }
+}
+
+// --- system prompt ---
+
+/**
+ * builds the system prompt for the agent.
+ *
+ * The system prompt is assembled from:
+ * - the agent's role and capabilities
+ * - the tool call XML format with examples
+ * - the current goal
+ * - the repo root path
+ * - any facts accumulated so far
+ *
+ * It is prepended to every `buildMessages` call and is not stored
+ * in the session history.
+ */
+@export
+val buildSystemPrompt = fn(session, slugSpec, manifest) {
+  val factsBlock = match session.facts {
+    [] => ""
+    fs => "\n## Discovered facts\n\n" + fs /> map(fn(f) { "- " + f }) /> join("\n") + "\n"
+  }
+
+  '''
+You are Knuckles, a Slug coding agent. You help developers inspect, understand,
+and modify Slug codebases through a small set of explicit tools.
+
+## Your task
+
+Goal: ''' + session.goal + '''
+Repo: ''' + session.repoRoot + '''
+
+## Rules
+
+- Think step by step before calling a tool.
+- Call exactly one tool per response.
+- Always read a file before editing it.
+- For edits, make the search string unique enough to match exactly once.
+- When the task is complete call the done tool with a clear summary.
+- Do not guess at file contents — read first.
+- Do not modify files outside the repo root.
+
+## Tool call format
+
+Emit exactly one tool call per response using XML tags:
+
+<tool>read</tool><path>src/eval.slug</path>
+
+<tool>edit</tool><path>src/eval.slug</path>
+<search>val cache = nil</search>
+<replace>val cache = {}</replace>
+<desc>initialise cache as empty map</desc>
+
+<tool>list</tool><path>src</path>
+
+<tool>find</tool><pattern>import</pattern><path>src</path>
+
+<tool>write</tool><path>src/new.slug</path>
+<content>val x = 1</content>
+
+<tool>run</tool><cmd>slug test src/eval.slug</cmd>
+
+<tool>diff</tool>
+
+<tool>done</tool>
+<summary>Added caching to the evaluator. Modified src/eval.slug and updated tests.</summary>
+
+## Available tools
+
+| Tool    | Args                                      | Purpose                          |
+|---------|-------------------------------------------|----------------------------------|
+| read    | path                                      | read a file                      |
+| list    | path                                      | list directory contents          |
+| find    | pattern, path (optional)                  | search for text in .slug files   |
+| write   | path, content                             | create or overwrite a file       |
+| edit    | path, search, replace, desc               | surgical single-occurrence edit  |
+| run     | cmd                                       | run a shell command              |
+| diff    | (none)                                    | show all changes made so far     |
+| done    | summary                                   | finish and summarise the task    |
+''' + factsBlock + "\n## Slug language reference\n\n" + slugSpec +
+  "\n## Module manifest\n\n" + manifest
+}
+
+// --- conversation builder ---
+
+/**
+ * builds the messages list to send to the model.
+ *
+ * Combines the system prompt (as a leading user message, since Ollama
+ * does not support a dedicated system role in all models) with the
+ * session history, keeping only the last `contextWindow` turns.
+ *
+ * The system prompt is always fresh — facts and goal state are current.
+ */
+@export
+val buildMessages = fn(session, slugSpec, manifest, contextWindow = 20) {
+  val system  = buildSystemPrompt(session, slugSpec, manifest)
+  val history = session /> recentHistory(contextWindow)
+  val turns   = history /> map(fn(t) {{
+    role:    label(t.role),
+    content: t.content,
+  }})
+  [{ role: "user", content: system }] + turns
+}
+
+// --- done summary formatting ---
+
+/**
+ * formats the final session summary for display to the developer.
+ */
+@export
+val formatSummary = fn(session) {
+  val patchLines = match session.patches {
+    [] => "  (no files modified)"
+    ps => ps /> map(fn(p) { "  " + p.path + "\n    " + p.desc }) /> join("\n")
+  }
+
+  """
+Knuckles — Task Complete
+========================
+
+Goal:  {{session.goal}}
+Turns: {{session.turn}}
+
+Changes:
+{{patchLines}}
+
+Summary:
+{{session.summary}}
+"""
+}

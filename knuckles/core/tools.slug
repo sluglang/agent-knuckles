@@ -1,0 +1,286 @@
+/**
+ * knuckles.core.tools — agent tool implementations
+ *
+ * Each tool takes the current session and a string-keyed args map,
+ * executes its operation, and returns `{ ok, output, session }`.
+ *
+ * The session is returned so tools can record their result via
+ * `addResult` and callers always get back the updated state.
+ *
+ * ## Path safety
+ *
+ * All tools that accept a `path` argument resolve it through
+ * `session.absPath` and validate it with `session.isSafePath`.
+ * Paths outside `repoRoot` or containing `..` are rejected.
+ *
+ * ## Tool contracts
+ *
+ * | Tool    | Args                          | Returns                         |
+ * |---------|-------------------------------|---------------------------------|
+ * | `read`  | `path`                        | file contents as string         |
+ * | `list`  | `path`                        | newline-separated file listing  |
+ * | `find`  | `pattern`, `path?`            | matching lines with file:line   |
+ * | `write` | `path`, `content`             | confirmation string             |
+ * | `edit`  | `path`, `search`, `replace`, `desc` | confirmation + line count |
+ * | `run`   | `cmd`                         | stdout + stderr                 |
+ * | `diff`  | (none)                        | summary of all patches so far   |
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val fs      = import("slug.io.fs")
+val sys     = import("slug.sys")
+val session = import("knuckles.core.session")
+
+// --- result helpers ---
+
+val toolOk  = fn(s, tool, output) {{ ok: true,  output: output, session: session.addResult(s, tool, true,  output) }}
+val toolErr = fn(s, tool, msg)    {{ ok: false, output: msg,    session: session.addResult(s, tool, false, msg)    }}
+
+// --- path guard ---
+// Resolves and validates a path. Returns { ok, path, session } or an error result.
+
+val resolvePath = fn(s, tool, rawPath) {
+  match session.isSafePath(s, rawPath) {
+    false => {{ ok: false, path: nil, err: "unsafe path: " + rawPath }}
+    true  => {{ ok: true,  path: session.absPath(s, rawPath), err: nil }}
+  }
+}
+
+// ============================================================
+// read — read entire file contents
+// ============================================================
+
+/**
+ * reads the entire contents of a file and returns it as a string.
+ *
+ * Fails if the path is outside `repoRoot` or the file does not exist.
+ */
+@export
+val read = fn(s, args) {
+  val rawPath = args["path"]
+  val r       = resolvePath(s, "read", rawPath)
+  match r.ok {
+    false => toolErr(s, "read", r.err)
+    true  => match fs.exists(r.path) {
+      false => toolErr(s, "read", "file not found: " + rawPath)
+      true  => toolOk(s, "read", fs.readFile(r.path))
+    }
+  }
+}
+
+// ============================================================
+// list — list directory contents recursively
+// ============================================================
+
+/**
+ * lists all files under `path` recursively.
+ *
+ * Returns a newline-separated list of paths relative to `repoRoot`.
+ * Fails if path is not a directory.
+ */
+@export
+val list = fn(s, args) {
+  val rawPath = args["path"] /> ifNil(".")
+  val r       = resolvePath(s, "list", rawPath)
+  match r.ok {
+    false => toolErr(s, "list", r.err)
+    true  => match fs.isDir(r.path) {
+      false => toolErr(s, "list", "not a directory: " + rawPath)
+      true  => {
+        val files = fs.listFilesRecursive([r.path])
+        val rootLen = len(s.repoRoot + "/")
+        val relative = files /> map(fn(f) { f[rootLen:] })
+        toolOk(s, "list", relative /> join("\n"))
+      }
+    }
+  }
+}
+
+// ============================================================
+// find — search for a pattern across source files
+// ============================================================
+
+/**
+ * searches for lines matching `pattern` (plain string) in files under `path`.
+ *
+ * Returns matching lines in `file:linenum: content` format.
+ * `path` defaults to the repo root. Only searches `.slug` files by default.
+ */
+@export
+val find = fn(s, args) {
+  val pattern = args["pattern"]
+  val rawPath = args["path"] /> ifNil(".")
+  val r       = resolvePath(s, "find", rawPath)
+  match r.ok {
+    false => toolErr(s, "find", r.err)
+    true  => {
+      val files   = fs.listFilesRecursive([r.path], fn(f) { f /> endsWith(".slug") })
+      val rootLen = len(s.repoRoot + "/")
+      val matches = files /> flatMap(fn(file) {
+        val content = fs.readFile(file)
+        val relPath = file[rootLen:]
+        content /> split("\n") /> zipWithIndex /> flatMap(fn(pair) {
+          val line    = pair[0]
+          val lineNum = pair[1] + 1
+          match line /> contains(pattern) {
+            true  => [relPath + ":" + lineNum + ": " + line]
+            false => []
+          }
+        })
+      })
+      match matches {
+        [] => toolOk(s, "find", "no matches for: " + pattern)
+        _  => toolOk(s, "find", matches /> join("\n"))
+      }
+    }
+  }
+}
+
+// ============================================================
+// write — write or overwrite a file
+// ============================================================
+
+/**
+ * writes `content` to `path`, creating the file if it does not exist.
+ *
+ * The parent directory must already exist. Use with care — this
+ * overwrites without confirmation. For modifications to existing files,
+ * prefer `edit`.
+ */
+@export
+val write = fn(s, args) {
+  val rawPath = args["path"]
+  val content = args["content"]
+  val r       = resolvePath(s, "write", rawPath)
+  match r.ok {
+    false => toolErr(s, "write", r.err)
+    true  => {
+      fs.writeFile(content, r.path)
+      toolOk(s, "write", "written: " + rawPath + " (" + len(content) + " chars)")
+    }
+  }
+}
+
+// ============================================================
+// edit — surgical single-occurrence string replacement
+// ============================================================
+
+/**
+ * replaces exactly one occurrence of `search` with `replace` in `path`.
+ *
+ * Fails explicitly if:
+ * - the file does not exist
+ * - `search` is not found in the file
+ * - `search` matches more than one location
+ *
+ * The strictness is intentional — the model must construct a `search`
+ * string unique enough to identify exactly the right location. This
+ * prevents accidental multi-site edits and forces precise context.
+ *
+ * On success, records the patch in the session.
+ */
+@export
+val edit = fn(s, args) {
+  val rawPath = args["path"]
+  val search  = args["search"]
+  val replace = args["replace"]
+  val desc    = args["desc"] /> ifNil("edit " + rawPath)
+  val r       = resolvePath(s, "edit", rawPath)
+  match r.ok {
+    false => toolErr(s, "edit", r.err)
+    true  => match fs.exists(r.path) {
+      false => toolErr(s, "edit", "file not found: " + rawPath)
+      true  => {
+        val content    = fs.readFile(r.path)
+        val firstMatch = content /> indexOf(search)
+        match firstMatch {
+          -1 => toolErr(s, "edit", "search string not found in: " + rawPath)
+          _  => {
+            // check for a second occurrence after the first
+            val secondMatch = content /> indexOf(search, firstMatch + len(search))
+            match secondMatch {
+              n if n >= 0 => toolErr(s, "edit",
+                "search string matches multiple locations in: " + rawPath +
+                " — make it more specific"
+              )
+              _ => {
+                val updated = content[0:firstMatch] + replace + content[firstMatch + len(search):]
+                fs.writeFile(updated, r.path)
+                val s2 = session.addPatch(s, rawPath, search, replace, desc)
+                toolOk(s2, "edit", "edited: " + rawPath + " — " + desc)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
+// run — execute a shell command
+// ============================================================
+
+/**
+ * runs a shell command synchronously and returns stdout + stderr.
+ *
+ * The command is executed with the repo root as working directory.
+ * Timeout is controlled by `cfg("run_timeout_ms", 30000)`.
+ * Both stdout and stderr are returned regardless of exit code.
+ */
+@export
+val run = fn(s, args) {
+  val cmd        = args["cmd"]
+  val timeoutMs  = cfg("run_timeout_ms", 30000)
+  val cdCmd      = "cd " + s.repoRoot + " && " + cmd
+  val [out, err] = sys.exec(cdCmd, timeoutMs)
+  val combined   = match err /> trim {
+    "" => out
+    _  => out + "\n[stderr]\n" + err
+  }
+  toolOk(s, "run", combined)
+}
+
+// ============================================================
+// diff — summarise all patches applied so far
+// ============================================================
+
+/**
+ * returns a summary of all patches applied in this session.
+ *
+ * Shows each file edited and its description. Useful for the model
+ * to review what has been changed before calling `done`.
+ */
+@export
+val diff = fn(s, args) {
+  toolOk(s, "diff", session.patchSummary(s))
+}
+
+// ============================================================
+// dispatch — route an action to the correct tool
+// ============================================================
+
+/**
+ * dispatches a parsed `Action` to the appropriate tool function.
+ *
+ * Returns `{ ok, output, session }`. If the action type is unknown
+ * or is `:error`, returns an error result without touching the session.
+ */
+@export
+val dispatch = fn(s, action) {
+  match action.type {
+    :read  => read(s,  action.args)
+    :list  => list(s,  action.args)
+    :find  => find(s,  action.args)
+    :write => write(s, action.args)
+    :edit  => edit(s,  action.args)
+    :run   => run(s,   action.args)
+    :diff  => diff(s,  action.args)
+    :error => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
+    t      => toolErr(s, "dispatch", "no tool for action type: " + label(t))
+  }
+}

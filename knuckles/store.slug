@@ -1,0 +1,174 @@
+/**
+ * knuckles.store — session persistence
+ *
+ * Saves and loads agent sessions to a local SQLite database.
+ * Uses `slug.db.migration` to ensure the schema is always current
+ * and `slug.json` to serialise the full session state.
+ *
+ * ## Database location
+ *
+ * Controlled by `cfg("knuckles_db", "knuckles.db")`. Override via
+ * config or the `--knuckles-db` CLI option.
+ *
+ * ## Schema
+ *
+ * The `kn_sessions` table stores one row per session. Scalar columns
+ * (`goal`, `repo_root`, `turn`, `done`) are indexed for fast listing.
+ * The full session state is stored as JSON in the `state` column and
+ * round-trips through `slug.json#encode` / `slug.json#decode`.
+ *
+ * ## Session IDs
+ *
+ * IDs are 16-character random hex strings generated at creation time.
+ * They are opaque — use `listSessions` to discover them.
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val db       = import("slug.io.db")
+val json     = import("slug.json")
+val migrate  = import("slug.db.migration")
+val session  = import("knuckles.core.session")
+
+val DB_PATH = cfg("knuckles_db", "knuckles.db")
+
+// --- connection ---
+
+/**
+ * opens the Knuckles SQLite database and ensures the schema is current.
+ *
+ * Returns a connection handle. Always `defer db.close(conn)` after calling.
+ *
+ * @effects('db fs')
+ */
+@export
+val openDb = fn() {
+  val conn = db.connect("file:" + DB_PATH + "?cache=shared&mode=rwc", db.SQLITE_DRIVER)
+  migrate.up(conn, base = "db/migrations")
+  conn
+}
+
+// --- serialisation ---
+
+val sessionToRow = fn(id, s) {{
+  id:        id,
+  goal:      s.goal,
+  repo_root: s.repoRoot,
+  turn:      s.turn,
+  done:      match s.done { true => 1 false => 0 },
+  summary:   s.summary,
+  state:     json.encode(s),
+}}
+
+val rowToSession = fn(row) {
+  json.decode(row["state"])
+}
+
+// --- queries ---
+
+val Q_INSERT = '''
+  INSERT INTO kn_sessions (id, goal, repo_root, turn, done, summary, state)
+  VALUES (:id, :goal, :repo_root, :turn, :done, :summary, :state)
+'''
+
+val Q_UPDATE = '''
+  UPDATE kn_sessions
+  SET turn       = :turn,
+      done       = :done,
+      summary    = :summary,
+      state      = :state,
+      updated_at = CURRENT_TIMESTAMP
+  WHERE id = :id
+'''
+
+val Q_SELECT_BY_ID = '''
+  SELECT * FROM kn_sessions WHERE id = :id
+'''
+
+val Q_SELECT_ALL = '''
+  SELECT id, goal, repo_root, turn, done, summary, created_at, updated_at
+  FROM kn_sessions
+  ORDER BY created_at DESC
+'''
+
+val Q_SELECT_ACTIVE = '''
+  SELECT id, goal, repo_root, turn, done, summary, created_at, updated_at
+  FROM kn_sessions
+  WHERE done = 0
+  ORDER BY created_at DESC
+'''
+
+// --- public API ---
+
+/**
+ * creates a new session in the database and returns `{ id, session }`.
+ *
+ * The session ID is a 16-char random hex string. The session is saved
+ * immediately so it exists in the DB from turn 0.
+ *
+ * @effects('db')
+ */
+@export
+val createSession = fn(conn, @str goal, @str repoRoot) {
+  val id = randomHexString(16)
+  val s  = session.newSession(goal, repoRoot)
+  val row = sessionToRow(id, s)
+  db.exec(conn, Q_INSERT, row.id, row.goal, row.repo_root, row.turn, row.done, row.summary, row.state)
+  { id: id, session: s }
+}
+
+/**
+ * saves the current session state to the database.
+ *
+ * Called after every tool call to ensure crash recovery.
+ *
+ * @effects('db')
+ */
+@export
+val saveSession = fn(conn, @str id, s) {
+  val row = sessionToRow(id, s)
+  db.exec(conn, Q_UPDATE, row.turn, row.done, row.summary, row.state, row.id)
+  s
+}
+
+/**
+ * loads a session by ID.
+ *
+ * Returns `{ id, session }` or `nil` if not found.
+ *
+ * @effects('db')
+ */
+@export
+val loadSession = fn(conn, @str id) {
+  db.query(conn, Q_SELECT_BY_ID, id)
+  /> match {
+    []    => nil
+    [row] => {{ id: id, session: rowToSession(row) }}
+  }
+}
+
+/**
+ * returns a list of all sessions as summary rows (no state JSON).
+ *
+ * Each row contains `id`, `goal`, `repo_root`, `turn`, `done`,
+ * `summary`, `created_at`, `updated_at`.
+ *
+ * @effects('db')
+ */
+@export
+val listSessions = fn(conn) {
+  db.query(conn, Q_SELECT_ALL)
+}
+
+/**
+ * returns a list of sessions that have not yet completed.
+ *
+ * @effects('db')
+ */
+@export
+val listActiveSessions = fn(conn) {
+  db.query(conn, Q_SELECT_ACTIVE)
+}

@@ -1,0 +1,141 @@
+/**
+ * knuckles — Slug coding agent
+ *
+ * A local coding agent that inspects, understands, and modifies
+ * Slug repositories through an iterative tool-use loop backed by
+ * a local Ollama model.
+ *
+ * Usage:
+ * ```bash
+ * slug run knuckles.slug run    --goal "Add caching to evaluator" --repo .
+ * slug run knuckles.slug resume --id a3f9c2d1
+ * slug run knuckles.slug list
+ * ```
+ *
+ * Commands:
+ * - `run`     start a new agent session
+ * - `resume`  resume an existing session by ID
+ * - `list`    show all sessions
+ *
+ * Options:
+ * - `-h, --help`      show this screen
+ * - `-v, --version`   show version
+ * - `--goal`          task description (required for `run`)
+ * - `--repo`          repository root path (default: .)
+ * - `--id`            session ID (required for `resume`)
+ * - `--model`         Ollama model name (default: llama3)
+ * - `--db`            SQLite database path (default: knuckles.db)
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val db    = import("slug.io.db")
+val sys   = import("slug.sys")
+val agent = import("knuckles.agent")
+val store = import("knuckles.store")
+val { argsWith } = import("slug.cli")
+
+// --- CLI spec ---
+
+val spec = {
+  name:    "knuckles",
+  version: "0.1.0",
+  summary: "Slug coding agent — AI-assisted development for Slug repositories",
+  defaults: {
+    repo:  ".",
+    model: "llama3",
+    db:    "knuckles.db",
+  },
+  types: {
+    goal:  "str",
+    repo:  "str",
+    id:    "str",
+    model: "str",
+    db:    "str",
+  },
+  desc: {
+    goal:  "task description (required for `run`)",
+    repo:  "repository root path",
+    id:    "session ID (required for `resume`)",
+    model: "Ollama model name",
+    db:    "SQLite database path",
+  },
+  positional: { min: 0, max: 1, name: "command" },
+}
+
+// --- session listing ---
+
+val printSessions = fn(sessions) {
+  match sessions {
+    [] => println("no sessions found.")
+    _  => {
+      println(fmt("|{:<16s}|{:<8s}|{:<10s}| goal", "id", "turns", "status"))
+      println("|" + padRight("", "-", 16) + "|" + padRight("", "-", 8) + "|" + padRight("", "-", 10) + "|" + padRight("", "-", 40))
+      sessions /> map(fn(row) {
+        val status = match row["done"] { 1 => "done" _ => "active" }
+        println(fmt("|{:<16s}|{:<8d}|{:<10s}| {}", row["id"], row["turn"], status, row["goal"]))
+      })
+    }
+  }
+}
+
+// --- entrypoint ---
+
+@main
+val main = fn(args = argm()) {
+  val result = args /> argsWith(spec)
+
+  match result {
+    { action: :help }    => { println(result.text); sys.exit(0) }
+    { action: :version } => { println(result.text); sys.exit(0) }
+    { action: :error }   => {
+      result.errors /> map(fn(e) { println(e.msg) })
+      sys.exit(1)
+    }
+    { ok: true, options, positional } => {
+
+      // forward db and model into cfg so agent/store pick them up
+      sys.setEnv("SLUG_CFG_knuckles_db", options.db)
+      sys.setEnv("SLUG_CFG_knuckles_model", options.model)
+
+      val command = match positional {
+        []         => "list"
+        [cmd, ...] => cmd
+      }
+
+      match command {
+        "run" => {
+          match options.goal {
+            nil => {
+              println("error: --goal is required for the run command")
+              sys.exit(1)
+            }
+            goal => agent.run(goal, options.repo)
+          }
+        }
+        "resume" => {
+          match options.id {
+            nil => {
+              println("error: --id is required for the resume command")
+              sys.exit(1)
+            }
+            id => agent.resume(id)
+          }
+        }
+        "list" => {
+          val conn = store.openDb()
+          defer { db.close(conn) }
+          store.listSessions(conn) /> printSessions
+        }
+        _ => {
+          println(fmt("unknown command: {}", command))
+          println(result.text)
+          sys.exit(1)
+        }
+      }
+    }
+  }
+}

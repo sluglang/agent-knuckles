@@ -1,0 +1,237 @@
+/**
+ * knuckles.core.session — immutable agent session state
+ *
+ * A session represents a single coding task from start to finish.
+ * All state transformations return a new session — nothing is mutated.
+ * This makes sessions replayable, diffable, and trivially testable.
+ *
+ * ## Session lifecycle
+ *
+ * ```slug
+ * val session = newSession("Add caching to evaluator", "/home/user/myrepo")
+ *
+ * // each step produces a new session
+ * val s1 = session  /> addHistory(:user, "Let's start by reading the file")
+ * val s2 = s1       /> addResult("read", "val cache = ...")
+ * val s3 = s2       /> addHistory(:assistant, "I can see the evaluator...")
+ * val s4 = s3       /> addPatch("src/eval.slug", before, after)
+ * val s5 = s4       /> addFact("evaluator uses a map for state")
+ * ```
+ *
+ * ## Fields
+ *
+ * | Field      | Description                                          |
+ * |------------|------------------------------------------------------|
+ * | `goal`     | The task the agent is working toward                 |
+ * | `repoRoot` | Absolute path to the repository root                 |
+ * | `history`  | Conversation turns sent to the model `{ role, content }` |
+ * | `facts`    | Stable discoveries worth retaining across turns      |
+ * | `patches`  | Applied edits recorded for the final summary         |
+ * | `results`  | Tool outputs from the current session                |
+ * | `turn`     | Current iteration count                              |
+ * | `done`     | Whether the agent has signalled completion           |
+ * | `summary`  | Final summary produced when done                     |
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+
+// --- structs ---
+
+/**
+ * a single conversation turn in the session history.
+ *
+ * `role` is `:user` or `:assistant`.
+ * `content` is the raw text of the turn.
+ */
+@export
+val Turn = struct {
+  @sym role,
+  @str content,
+}
+
+/**
+ * a record of a single file edit applied during the session.
+ *
+ * Used to build the change summary at the end of the session.
+ */
+@export
+val Patch = struct {
+  @str path,
+  @str before,
+  @str after,
+  @str desc,
+}
+
+/**
+ * the result of a single tool call.
+ *
+ * `tool` is the tool name (e.g. `"read"`, `"edit"`).
+ * `ok` indicates whether the tool succeeded.
+ * `output` is the result text shown to the model.
+ */
+@export
+val ToolResult = struct {
+  @str  tool,
+  @bool ok,
+  @str  output,
+}
+
+/**
+ * the complete state of a single agent session.
+ *
+ * Never mutate directly — use the transformer functions below.
+ */
+@export
+val Session = struct {
+  @str  goal,
+  @str  repoRoot,
+  @list history,
+  @list facts,
+  @list patches,
+  @list results,
+  @num  turn,
+  @bool done,
+  @str  summary,
+}
+
+// --- constructor ---
+
+/**
+ * creates a new session for the given goal and repository root.
+ *
+ * `repoRoot` must be an absolute path. The session starts with
+ * an empty history, no facts, no patches, and turn 0.
+ */
+@export
+val newSession = fn(@str goal, @str repoRoot) {
+  Session {
+    goal:     goal,
+    repoRoot: repoRoot,
+    history:  [],
+    facts:    [],
+    patches:  [],
+    results:  [],
+    turn:     0,
+    done:     false,
+    summary:  nil,
+  }
+}
+
+// --- state transformers ---
+
+/**
+ * appends a conversation turn to the session history.
+ *
+ * `role` should be `:user` or `:assistant`.
+ */
+@export
+val addHistory = fn(session, @sym role, @str content) {
+  session copy { history: session.history :+ Turn { role: role, content: content } }
+}
+
+/**
+ * appends a stable fact discovered during the session.
+ *
+ * Facts are injected into future prompts to preserve context
+ * without requiring the full tool output history.
+ */
+@export
+val addFact = fn(session, @str fact) {
+  session copy { facts: session.facts :+ fact }
+}
+
+/**
+ * records an applied patch in the session.
+ *
+ * `desc` is a short human-readable description used in the summary.
+ */
+@export
+val addPatch = fn(session, @str path, @str before, @str after, @str desc) {
+  session copy { patches: session.patches :+ Patch { path: path, before: before, after: after, desc: desc } }
+}
+
+/**
+ * records the output of a tool call in the session.
+ */
+@export
+val addResult = fn(session, @str tool, @bool ok, @str output) {
+  session copy { results: session.results :+ ToolResult { tool: tool, ok: ok, output: output } }
+}
+
+/**
+ * increments the turn counter.
+ *
+ * Called at the start of each agent iteration.
+ */
+@export
+val nextTurn = fn(session) {
+  session copy { turn: session.turn + 1 }
+}
+
+/**
+ * marks the session as complete with a final summary.
+ */
+@export
+val finish = fn(session, @str summary) {
+  session copy { done: true, summary: summary }
+}
+
+// --- accessors ---
+
+/**
+ * returns the last N turns of history.
+ *
+ * Useful for building prompts with a rolling context window.
+ */
+@export
+val recentHistory = fn(session, @num n) {
+  val h = session.history
+  val start = match len(h) > n { true => len(h) - n false => 0 }
+  h[start:]
+}
+
+/**
+ * returns the absolute path for a repo-relative path.
+ *
+ * All tool paths must be passed through this before any filesystem access.
+ */
+@export
+val absPath = fn(session, @str path) {
+  val root = match session.repoRoot /> endsWith("/") {
+    true  => session.repoRoot
+    false => session.repoRoot + "/"
+  }
+  // if already absolute and under repoRoot, pass through
+  match path /> startsWith("/") {
+    true  => path
+    false => root + path
+  }
+}
+
+/**
+ * returns true if `path` is safely within `repoRoot`.
+ *
+ * Rejects path traversal attempts (`..`) and paths outside the repo.
+ */
+@export
+val isSafePath = fn(session, @str path) {
+  val abs = absPath(session, path)
+  !(path /> contains("..")) && abs /> startsWith(session.repoRoot)
+}
+
+// --- summary helpers ---
+
+/**
+ * returns a short human-readable summary of the session's patches.
+ */
+@export
+val patchSummary = fn(session) {
+  match session.patches {
+    [] => "No files were modified."
+    ps => ps /> map(fn(p) { "  " + p.path + " — " + p.desc }) /> join("\n")
+  }
+}

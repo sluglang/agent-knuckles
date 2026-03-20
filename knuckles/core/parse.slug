@@ -1,0 +1,223 @@
+/**
+ * knuckles.core.parse — XML tool call parser
+ *
+ * Parses raw model responses into structured `Action` values.
+ * No LLM dependency — purely string processing, fully testable.
+ *
+ * ## Tool call format
+ *
+ * The model emits tool calls as XML tags embedded in its response:
+ *
+ * ```xml
+ * <tool>read</tool><path>src/eval.slug</path>
+ * ```
+ *
+ * ```xml
+ * <tool>edit</tool><path>src/eval.slug</path>
+ * <search>val cache = nil</search>
+ * <replace>val cache = {}</replace>
+ * <desc>initialise cache as empty map</desc>
+ * ```
+ *
+ * ```xml
+ * <tool>done</tool>
+ * <summary>Added caching to the evaluator and updated tests.</summary>
+ * ```
+ *
+ * The parser extracts the first `<tool>` tag to determine the action type,
+ * then extracts the remaining tags as the argument map. Any surrounding
+ * prose is preserved in the `thought` field for logging.
+ *
+ * ## Action shapes
+ *
+ * | `type`     | Args                                      |
+ * |------------|-------------------------------------------|
+ * | `:read`    | `path`                                    |
+ * | `:list`    | `path`                                    |
+ * | `:find`    | `pattern`, `path` (optional)              |
+ * | `:write`   | `path`, `content`                         |
+ * | `:edit`    | `path`, `search`, `replace`, `desc`       |
+ * | `:run`     | `cmd`                                     |
+ * | `:diff`    | (no args)                                 |
+ * | `:done`    | `summary`                                 |
+ * | `:error`   | `msg` — parse failure, not a model error  |
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+
+// --- structs ---
+
+/**
+ * a parsed action from the model response.
+ *
+ * `type`    — the action kind as a symbol (`:read`, `:edit`, `:done` etc.)
+ * `args`    — string-keyed map of tag values extracted from the XML
+ * `thought` — everything in the response before the first `<tool>` tag;
+ *             useful for logging the model's reasoning
+ * `raw`     — the original unparsed response string
+ */
+@export
+val Action = struct {
+  @sym  type,
+  @map  args,
+  @str  thought,
+  @str  raw,
+}
+
+// --- XML tag extraction ---
+
+/**
+ * extracts the content of the first occurrence of `<tag>...</tag>` in `s`.
+ *
+ * Returns `nil` if the tag is not found.
+ */
+@testWith(
+  ["<tool>read</tool>", "tool"],                    "read",
+  ["<path>src/foo.slug</path>", "path"],            "src/foo.slug",
+  ["no tags here", "tool"],                         nil,
+  ["<tool>read</tool><path>x</path>", "path"],      "x",
+  ["<content>hello\nworld</content>", "content"],   "hello\nworld",
+)
+val extractTag = fn(@str s, @str tag) {
+  val open  = "<" + tag + ">"
+  val close = "</" + tag + ">"
+  val start = s /> indexOf(open)
+  match start {
+    -1 => nil
+    _  => {
+      val contentStart = start + len(open)
+      val end          = s /> indexOf(close, contentStart)
+      match end {
+        -1 => nil
+        _  => s[contentStart:end]
+      }
+    }
+  }
+}
+
+/**
+ * extracts all known argument tags from a response string into a map.
+ *
+ * Returns a string-keyed map of tag name → content for all tags present.
+ * Missing tags are omitted (not set to nil).
+ */
+@testWith(
+  ["<path>foo.slug</path><desc>fix it</desc>", ["path", "desc"]],
+    { "path": "foo.slug", "desc": "fix it" },
+  ["<path>foo.slug</path>", ["path", "desc"]],
+    { "path": "foo.slug" },
+)
+val extractArgs = fn(@str s, @list tagNames) {
+  tagNames /> reduce({}, fn(acc, tag) {
+    match extractTag(s, tag) {
+      nil => acc
+      v   => put(acc, tag, v)
+    }
+  })
+}
+
+// --- action type detection ---
+
+val KNOWN_TOOLS = ["read", "list", "find", "write", "edit", "run", "diff", "done"]
+
+val TOOL_ARGS = {
+  "read":  ["path"],
+  "list":  ["path"],
+  "find":  ["pattern", "path"],
+  "write": ["path", "content"],
+  "edit":  ["path", "search", "replace", "desc"],
+  "run":   ["cmd"],
+  "diff":  [],
+  "done":  ["summary"],
+}
+
+// --- parser ---
+
+/**
+ * parses a raw model response string into a structured `Action`.
+ *
+ * If no `<tool>` tag is found, or the tool name is unrecognised,
+ * returns an `:error` action with a descriptive `msg`.
+ * Never throws — all parse failures are represented as `:error` actions.
+ */
+@export
+@testWith(
+  ["<tool>read</tool><path>src/eval.slug</path>"],
+    Action{ type: :read, args: { "path": "src/eval.slug" }, thought: "", raw: "<tool>read</tool><path>src/eval.slug</path>" },
+  ["<tool>done</tool><summary>All done!</summary>"],
+    Action{ type: :done, args: { "summary": "All done!" }, thought: "", raw: "<tool>done</tool><summary>All done!</summary>" },
+  ["Let me think...\n<tool>list</tool><path>src</path>"],
+    Action{ type: :list, args: { "path": "src" }, thought: "Let me think...\n", raw: "Let me think...\n<tool>list</tool><path>src</path>" },
+  ["no tool here"],
+    Action{ type: :error, args: { "msg": "no <tool> tag found in response" }, thought: "no tool here", raw: "no tool here" },
+)
+val parseAction = fn(@str raw) {
+  val toolStart = raw /> indexOf("<tool>")
+  match toolStart {
+    -1 => Action {
+      type:    :error,
+      args:    { "msg": "no <tool> tag found in response" },
+      thought: raw,
+      raw:     raw,
+    }
+    _ => {
+      val thought  = raw[0:toolStart]
+      val toolName = extractTag(raw, "tool") /> ifNil("")
+      val argNames = TOOL_ARGS[toolName]
+      match argNames {
+        nil => Action {
+          type:    :error,
+          args:    { "msg": "unknown tool: \"" + toolName + "\"" },
+          thought: thought,
+          raw:     raw,
+        }
+        _ => Action {
+          type:    sym(toolName),
+          args:    extractArgs(raw, argNames),
+          thought: thought,
+          raw:     raw,
+        }
+      }
+    }
+  }
+}
+
+// --- validation ---
+
+val REQUIRED_ARGS = {
+  "read":  ["path"],
+  "list":  ["path"],
+  "find":  ["pattern"],
+  "write": ["path", "content"],
+  "edit":  ["path", "search", "replace"],
+  "run":   ["cmd"],
+  "diff":  [],
+  "done":  ["summary"],
+}
+
+/**
+ * validates that a parsed action has all required arguments.
+ *
+ * Returns `nil` if valid, or an error message string if a required
+ * argument is missing. Called after `parseAction` before tool dispatch.
+ */
+@export
+@testWith(
+  [Action{ type: :read,  args: { "path": "foo" }, thought: "", raw: "" }], nil,
+  [Action{ type: :edit,  args: { "path": "foo", "search": "x", "replace": "y" }, thought: "", raw: "" }], nil,
+  [Action{ type: :read,  args: {}, thought: "", raw: "" }], "tool 'read' missing required arg: path",
+  [Action{ type: :edit,  args: { "path": "foo", "search": "x" }, thought: "", raw: "" }], "tool 'edit' missing required arg: replace",
+)
+val validateAction = fn(action) {
+  val toolName = label(action.type)
+  val required = REQUIRED_ARGS[toolName] /> ifNil([])
+  required /> find(fn(arg) { action.args[arg] == nil })
+  /> match {
+    nil     => nil
+    missing => "tool '" + toolName + "' missing required arg: " + missing
+  }
+}

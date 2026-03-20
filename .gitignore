@@ -1,0 +1,24 @@
+# IntelliJ IDEA settings directory
+.idea/
+
+# Binary output directory
+bin/
+
+# distro folder can be ignored
+dist/
+
+# OSX System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ast json files
+*.ast.json
+*.ast.txt
+
+*.log
+
+# jekyll
+/docs/_site/
+/docs/.jekyll-cache/

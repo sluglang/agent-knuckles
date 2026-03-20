@@ -1,0 +1,233 @@
+/**
+ * knuckles.agent — agent execution loop
+ *
+ * Wires together `knuckles.core` and `knuckles.store` into the
+ * full agent loop. Calls Ollama, parses the response, dispatches
+ * the tool, persists state, and repeats until done or the turn
+ * limit is reached.
+ *
+ * ## Execution model
+ *
+ * ```
+ * session
+ *   /> nextTurn
+ *   /> buildMessages
+ *   /> ollamaChat
+ *   /> parseAction
+ *   /> validateAction
+ *   /> dispatch
+ *   /> addHistory (tool result as user turn)
+ *   /> saveSession
+ *   /> runLoop   (recur, or finish)
+ * ```
+ *
+ * Each iteration is a pure transformation on the session value.
+ * The session is persisted to SQLite after every tool call so
+ * that a crash at any point leaves a recoverable state.
+ *
+ * ## Configuration
+ *
+ * | Key                  | Default        | Description                         |
+ * |----------------------|----------------|-------------------------------------|
+ * | `knuckles_db`        | `knuckles.db`  | SQLite database path                |
+ * | `knuckles_model`     | `llama3`       | Ollama model name                   |
+ * | `ollama_url`         | `http://localhost:11434` | Ollama base URL        |
+ * | `knuckles_max_turns` | `50`           | Maximum turns before giving up      |
+ * | `knuckles_context`   | `20`           | History turns sent to model         |
+ * | `run_timeout_ms`     | `30000`        | Shell command timeout in ms         |
+ * | `knuckles_slug_spec` | `SLUG.ai`      | Path to SLUG.ai for system prompt   |
+ * | `knuckles_manifest`  | `MANIFEST.ai`  | Path to MANIFEST.ai for system prompt |
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val db      = import("slug.io.db")
+val fs      = import("slug.io.fs")
+val ollama  = import("slug.thirdparty.ollama")
+val session = import("knuckles.core.session")
+val parse   = import("knuckles.core.parse")
+val tools   = import("knuckles.core.tools")
+val fmt     = import("knuckles.core.format")
+val store   = import("knuckles.store")
+
+val MAX_TURNS   = cfg("knuckles_max_turns", 50)
+val CONTEXT     = cfg("knuckles_context",   20)
+val MODEL       = cfg("knuckles_model",     "llama3")
+val SLUG_SPEC   = cfg("knuckles_slug_spec", "SLUG.ai")
+val MANIFEST    = cfg("knuckles_manifest",  "MANIFEST.ai")
+
+// --- spec loading ---
+// Loaded once at startup; missing files degrade gracefully.
+
+val loadSpec = fn(@str path) {
+  match fs.exists(path) {
+    true  => fs.readFile(path)
+    false => "// " + path + " not found"
+  }
+}
+
+// --- turn logging ---
+
+val logTurn = fn(s, action) {
+  val thought = match action.thought /> trim {
+    "" => ""
+    t  => "\n  " + t
+  }
+  println(fmt.fmt(
+    "[turn {:d}] {} {}{}",
+    s.turn,
+    label(action.type),
+    action.args["path"] /> ifNil(action.args["cmd"] /> ifNil("")),
+    thought,
+  ))
+}
+
+// --- core loop ---
+
+val runLoop = fn(conn, id, s, slugSpec, manifest) {
+  // turn limit guard
+  match s.turn >= MAX_TURNS {
+    true => {
+      val s2 = session.finish(s, "Turn limit reached (" + MAX_TURNS + "). Task incomplete.")
+      store.saveSession(conn, id, s2)
+      println("⚠ Turn limit reached.")
+      s2
+    }
+    false => {
+      val s1 = session.nextTurn(s)
+
+      // build messages and call the model
+      val messages  = fmt.buildMessages(s1, slugSpec, manifest, CONTEXT)
+      val response  = ollama.ollamaChat(messages, model = MODEL)
+
+      // handle model failure
+      match response {
+        nil => {
+          println("✗ Model returned nil — retrying next turn")
+          val s2 = s1
+            /> session.addHistory(:assistant, "[no response]")
+            /> session.addHistory(:user, "<result tool=\"error\" status=\"error\">\nModel returned no response. Please try again.\n</result>")
+          store.saveSession(conn, id, s2)
+          recur(conn, id, s2, slugSpec, manifest)
+        }
+        _ => {
+          // parse and validate the action
+          val action = parse.parseAction(response)
+          val valErr = parse.validateAction(action)
+
+          logTurn(s1, action)
+
+          // record the assistant turn
+          val s2 = s1 /> session.addHistory(:assistant, response)
+
+          // handle done before dispatching
+          match action.type {
+            :done => {
+              val summary = action.args["summary"] /> ifNil("Task complete.")
+              val s3 = s2 /> session.finish(summary)
+              store.saveSession(conn, id, s3)
+              println("")
+              println(fmt.formatSummary(s3))
+              s3
+            }
+            _ => {
+              // validation error — feed back to model without dispatching
+              val toolResult = match valErr {
+                nil => tools.dispatch(s2, action)
+                msg => {{ ok: false, output: msg, session: s2 }}
+              }
+
+              val resultMsg = fmt.formatResult({
+                tool:   label(action.type),
+                ok:     toolResult.ok,
+                output: toolResult.output,
+              })
+
+              val s3 = toolResult.session
+                /> session.addHistory(:user, resultMsg)
+
+              // persist after every tool call
+              store.saveSession(conn, id, s3)
+
+              recur(conn, id, s3, slugSpec, manifest)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// --- public entry points ---
+
+/**
+ * starts a new agent session for `goal` in `repoRoot`.
+ *
+ * Opens the database, runs migrations, creates the session record,
+ * loads the Slug spec and manifest, then enters the loop.
+ *
+ * Returns the completed session.
+ *
+ * @effects('db fs net')
+ */
+@export
+val run = fn(@str goal, @str repoRoot) {
+  val conn     = store.openDb()
+  defer { db.close(conn) }
+
+  val slugSpec = loadSpec(SLUG_SPEC)
+  val manifest = loadSpec(MANIFEST)
+
+  val { id, session: s } = store.createSession(conn, goal, repoRoot)
+
+  println("▶ Knuckles session " + id)
+  println("  goal: " + goal)
+  println("  repo: " + repoRoot)
+  println("")
+
+  runLoop(conn, id, s, slugSpec, manifest)
+}
+
+/**
+ * resumes an existing session by ID.
+ *
+ * Loads the session from the database and re-enters the loop
+ * from where it left off.
+ *
+ * Returns the completed session, or `nil` if the ID is not found.
+ *
+ * @effects('db fs net')
+ */
+@export
+val resume = fn(@str id) {
+  val conn = store.openDb()
+  defer { db.close(conn) }
+
+  val slugSpec = loadSpec(SLUG_SPEC)
+  val manifest = loadSpec(MANIFEST)
+
+  match store.loadSession(conn, id) {
+    nil => {
+      println("✗ Session not found: " + id)
+      nil
+    }
+    { session: s } => {
+      match s.done {
+        true => {
+          println("Session " + id + " is already complete.")
+          println(fmt.formatSummary(s))
+          s
+        }
+        false => {
+          println("▶ Resuming session " + id + " (turn " + s.turn + ")")
+          println("  goal: " + s.goal)
+          println("")
+          runLoop(conn, id, s, slugSpec, manifest)
+        }
+      }
+    }
+  }
+}
