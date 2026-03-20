@@ -7,6 +7,9 @@ bin/
 # distro folder can be ignored
 dist/
 
+# the agent database
+knuckles.db
+
 # OSX System Files
 .DS_Store
 .AppleDouble
