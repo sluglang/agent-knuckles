@@ -115,6 +115,7 @@ val Q_SELECT_ACTIVE = '''
 val createSession = fn(conn, @str goal, @str repoRoot) {
   val id = randomHexString(16)
   val s  = session.newSession(goal, repoRoot)
+println(s)
   val row = sessionToRow(id, s)
   db.exec(conn, Q_INSERT, row.id, row.goal, row.repo_root, row.turn, row.done, row.summary, row.state)
   { id: id, session: s }
@@ -129,6 +130,7 @@ val createSession = fn(conn, @str goal, @str repoRoot) {
  */
 @export
 val saveSession = fn(conn, @str id, s) {
+println(s)
   val row = sessionToRow(id, s)
   db.exec(conn, Q_UPDATE, row.turn, row.done, row.summary, row.state, row.id)
   s

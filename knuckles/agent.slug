@@ -31,7 +31,7 @@
  * |----------------------|----------------|-------------------------------------|
  * | `knuckles_db`        | `knuckles.db`  | SQLite database path                |
  * | `knuckles_model`     | `llama3`       | Ollama model name                   |
- * | `ollama_url`         | `http://localhost:11434` | Ollama base URL        |
+ * | `ollama_url`         | `http://localhost:11434` | Ollama base URL           |
  * | `knuckles_max_turns` | `50`           | Maximum turns before giving up      |
  * | `knuckles_context`   | `20`           | History turns sent to model         |
  * | `run_timeout_ms`     | `30000`        | Shell command timeout in ms         |
@@ -50,12 +50,12 @@ val ollama  = import("slug.thirdparty.ollama")
 val session = import("knuckles.core.session")
 val parse   = import("knuckles.core.parse")
 val tools   = import("knuckles.core.tools")
-val fmt     = import("knuckles.core.format")
+val format  = import("knuckles.core.format")
 val store   = import("knuckles.store")
 
 val MAX_TURNS   = cfg("knuckles_max_turns", 50)
 val CONTEXT     = cfg("knuckles_context",   20)
-val MODEL       = cfg("knuckles_model",     "llama3")
+val MODEL       = cfg("knuckles_model",     "qwen3-coder:480b-cloud")
 val SLUG_SPEC   = cfg("knuckles_slug_spec", "SLUG.ai")
 val MANIFEST    = cfg("knuckles_manifest",  "MANIFEST.ai")
 
@@ -76,7 +76,7 @@ val logTurn = fn(s, action) {
     "" => ""
     t  => "\n  " + t
   }
-  println(fmt.fmt(
+  println(fmt(
     "[turn {:d}] {} {}{}",
     s.turn,
     label(action.type),
@@ -100,7 +100,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
       val s1 = session.nextTurn(s)
 
       // build messages and call the model
-      val messages  = fmt.buildMessages(s1, slugSpec, manifest, CONTEXT)
+      val messages  = format.buildMessages(s1, slugSpec, manifest, CONTEXT)
       val response  = ollama.ollamaChat(messages, model = MODEL)
 
       // handle model failure
@@ -130,7 +130,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
               val s3 = s2 /> session.finish(summary)
               store.saveSession(conn, id, s3)
               println("")
-              println(fmt.formatSummary(s3))
+              println(format.formatSummary(s3))
               s3
             }
             _ => {
@@ -140,7 +140,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
                 msg => {{ ok: false, output: msg, session: s2 }}
               }
 
-              val resultMsg = fmt.formatResult({
+              val resultMsg = format.formatResult({
                 tool:   label(action.type),
                 ok:     toolResult.ok,
                 output: toolResult.output,
@@ -211,14 +211,14 @@ val resume = fn(@str id) {
 
   match store.loadSession(conn, id) {
     nil => {
-      println("✗ Session not found: " + id)
+      println("Session not found: " + id)
       nil
     }
     { session: s } => {
       match s.done {
         true => {
           println("Session " + id + " is already complete.")
-          println(fmt.formatSummary(s))
+          println(format.formatSummary(s))
           s
         }
         false => {

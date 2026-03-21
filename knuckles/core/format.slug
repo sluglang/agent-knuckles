@@ -23,6 +23,7 @@ val {*} = import(
   "slug.std",
   "slug.string",
   "slug.list",
+  "knuckles.core.session",
 )
 
 // --- tool result formatting ---
