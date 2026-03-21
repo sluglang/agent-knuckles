@@ -107,11 +107,13 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
       match response {
         nil => {
           println("✗ Model returned nil — retrying next turn")
-          val s2 = s1
-            /> session.addHistory(:assistant, "[no response]")
-            /> session.addHistory(:user, "<result tool=\"error\" status=\"error\">\nModel returned no response. Please try again.\n</result>")
-          store.saveSession(conn, id, s2)
-          recur(conn, id, s2, slugSpec, manifest)
+                    val nilMsg = "<result tool=\"error\" status=\"error\">\nModel returned no response. Please try again.\n</r>"
+          val s2 = s1 /> session.addHistory(:assistant, "[no response]")
+          store.appendTurn(conn, id, s2.turn, :assistant, "[no response]")
+          val s3 = s2 /> session.addHistory(:user, nilMsg)
+          store.appendTurn(conn, id, s3.turn, :user, nilMsg)
+          store.saveSession(conn, id, s3)
+          recur(conn, id, s3, slugSpec, manifest)
         }
         _ => {
           // parse and validate the action
@@ -120,8 +122,9 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
 
           logTurn(s1, action)
 
-          // record the assistant turn
+          // record the assistant turn — persist immediately
           val s2 = s1 /> session.addHistory(:assistant, response)
+          store.appendTurn(conn, id, s2.turn, :assistant, response)
 
           // handle done before dispatching
           match action.type {
@@ -149,7 +152,8 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
               val s3 = toolResult.session
                 /> session.addHistory(:user, resultMsg)
 
-              // persist after every tool call
+              // persist turn then updated session state
+              store.appendTurn(conn, id, s3.turn, :user, resultMsg)
               store.saveSession(conn, id, s3)
 
               recur(conn, id, s3, slugSpec, manifest)
