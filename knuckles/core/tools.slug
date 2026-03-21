@@ -201,6 +201,7 @@ val execCommand = fn(s, cmd) {
  * replaces exactly one occurrence of `search` with `replace` in `path`.
  *
  * Fails explicitly if:
+ * - `search` and `replace` are identical (no-op edit)
  * - the file does not exist
  * - `search` is not found in the file
  * - `search` matches more than one location
@@ -219,36 +220,46 @@ val edit = fn(s, args) {
   val search  = args["search"]
   val replace = args["replace"]
   val desc    = args["desc"] /> ifNil("edit " + rawPath)
-  val r       = resolvePath(s, "edit", rawPath)
-  match r.ok {
-    false => toolErr(s, "edit", r.err)
-    true  => match fs.exists(r.path) {
-      false => toolErr(s, "edit", "file not found: " + rawPath)
-      true  => {
-        val content    = fs.readFile(r.path)
-        val firstMatch = content /> indexOf(search)
-        match firstMatch {
-          -1 => toolErr(s, "edit", "search string not found in: " + rawPath)
-          _  => {
-            val secondMatch = content /> indexOf(search, firstMatch + len(search))
-            match secondMatch {
-              n if n >= 0 => toolErr(s, "edit",
-                "search string matches multiple locations in: " + rawPath +
-                " — make it more specific"
-              )
-              _ => {
-                val updated = content[0:firstMatch] + replace + content[firstMatch + len(search):]
-                fs.writeFile(updated, r.path)
-                val s2 = session.addPatch(s, rawPath, search, replace, desc)
 
-                // auto-run test command if configured
-                val testCmd    = cfg("run_after_edit", nil)
-                val testOutput = match testCmd {
-                  nil => ""
-                  cmd => "\n\n[auto-run: " + cmd + "]\n" + execCommand(s2, cmd)
+  // reject no-op edits — search and replace are identical, nothing would change
+  match search == replace {
+    true => toolErr(s, "edit",
+      "search and replace are identical — no change would be made. " +
+      "Use a more specific search string that targets exactly the line(s) you want to change."
+    )
+    false => {
+      val r = resolvePath(s, "edit", rawPath)
+      match r.ok {
+        false => toolErr(s, "edit", r.err)
+        true  => match fs.exists(r.path) {
+          false => toolErr(s, "edit", "file not found: " + rawPath)
+          true  => {
+            val content    = fs.readFile(r.path)
+            val firstMatch = content /> indexOf(search)
+            match firstMatch {
+              -1 => toolErr(s, "edit", "search string not found in: " + rawPath)
+              _  => {
+                val secondMatch = content /> indexOf(search, firstMatch + len(search))
+                match secondMatch {
+                  n if n >= 0 => toolErr(s, "edit",
+                    "search string matches multiple locations in: " + rawPath +
+                    " — make it more specific"
+                  )
+                  _ => {
+                    val updated = content[0:firstMatch] + replace + content[firstMatch + len(search):]
+                    fs.writeFile(updated, r.path)
+                    val s2 = session.addPatch(s, rawPath, search, replace, desc)
+
+                    // auto-run test command if configured
+                    val testCmd    = cfg("run_after_edit", nil)
+                    val testOutput = match testCmd {
+                      nil => ""
+                      cmd => "\n\n[auto-run: " + cmd + "]\n" + execCommand(s2, cmd)
+                    }
+
+                    toolOk(s2, "edit", "edited: " + rawPath + " — " + desc + testOutput)
+                  }
                 }
-
-                toolOk(s2, "edit", "edited: " + rawPath + " — " + desc + testOutput)
               }
             }
           }
