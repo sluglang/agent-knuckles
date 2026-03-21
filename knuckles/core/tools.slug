@@ -185,6 +185,18 @@ val write = fn(s, args) {
 // edit — surgical single-occurrence string replacement
 // ============================================================
 
+// Shared command execution helper used by both `run` and `edit`.
+// Runs cmd in repoRoot, returns combined stdout+stderr string.
+val execCommand = fn(s, cmd) {
+  val timeoutMs  = cfg("run_timeout_ms", 30000)
+  val cdCmd      = "cd " + s.repoRoot + " && " + cmd
+  val [out, err] = sys.exec(cdCmd, timeoutMs)
+  match err /> trim {
+    "" => out
+    _  => out + "\n[stderr]\n" + err
+  }
+}
+
 /**
  * replaces exactly one occurrence of `search` with `replace` in `path`.
  *
@@ -197,7 +209,9 @@ val write = fn(s, args) {
  * string unique enough to identify exactly the right location. This
  * prevents accidental multi-site edits and forces precise context.
  *
- * On success, records the patch in the session.
+ * On success, records the patch in the session. If `cfg("run_after_edit")`
+ * is set, that command is run automatically and its output is appended
+ * to the result so the model can see whether the edit broke anything.
  */
 @export
 val edit = fn(s, args) {
@@ -216,7 +230,6 @@ val edit = fn(s, args) {
         match firstMatch {
           -1 => toolErr(s, "edit", "search string not found in: " + rawPath)
           _  => {
-            // check for a second occurrence after the first
             val secondMatch = content /> indexOf(search, firstMatch + len(search))
             match secondMatch {
               n if n >= 0 => toolErr(s, "edit",
@@ -227,7 +240,15 @@ val edit = fn(s, args) {
                 val updated = content[0:firstMatch] + replace + content[firstMatch + len(search):]
                 fs.writeFile(updated, r.path)
                 val s2 = session.addPatch(s, rawPath, search, replace, desc)
-                toolOk(s2, "edit", "edited: " + rawPath + " — " + desc)
+
+                // auto-run test command if configured
+                val testCmd    = cfg("run_after_edit", nil)
+                val testOutput = match testCmd {
+                  nil => ""
+                  cmd => "\n\n[auto-run: " + cmd + "]\n" + execCommand(s2, cmd)
+                }
+
+                toolOk(s2, "edit", "edited: " + rawPath + " — " + desc + testOutput)
               }
             }
           }
@@ -250,15 +271,7 @@ val edit = fn(s, args) {
  */
 @export
 val run = fn(s, args) {
-  val cmd        = args["cmd"]
-  val timeoutMs  = cfg("run_timeout_ms", 30000)
-  val cdCmd      = "cd " + s.repoRoot + " && " + cmd
-  val [out, err] = sys.exec(cdCmd, timeoutMs)
-  val combined   = match err /> trim {
-    "" => out
-    _  => out + "\n[stderr]\n" + err
-  }
-  toolOk(s, "run", combined)
+  toolOk(s, "run", execCommand(s, args["cmd"]))
 }
 
 // ============================================================

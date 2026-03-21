@@ -25,6 +25,7 @@
  * - `--id`            session ID (required for `resume`)
  * - `--model`         Ollama model name (default: llama3)
  * - `--db`            SQLite database path (default: knuckles.db)
+ * - `--test`          command to run after every edit (e.g. "slug test .")
  */
 
 val {*} = import(
@@ -55,13 +56,15 @@ val spec = {
     id:    "str",
     model: "str",
     db:    "str",
+    test:  "str",
   },
   desc: {
     goal:  "task description (required for `run`)",
     repo:  "repository root path",
-    id:    "session ID (required for `resume`)",
+    id:    "session ID (required for `resume` and `show`)",
     model: "Ollama model name",
     db:    "SQLite database path",
+    test:  "command to run automatically after every successful edit",
   },
   positional: { min: 0, max: 1, name: "command" },
 }
@@ -97,9 +100,13 @@ val main = fn(args = argm()) {
     }
     { ok: true, options, positional } => {
 
-      // forward db and model into cfg so agent/store pick them up
-      sys.setEnv("SLUG_CFG_knuckles_db", options.db)
+      // forward options into cfg so agent/store/tools pick them up
+      sys.setEnv("SLUG_CFG_knuckles_db",    options.db)
       sys.setEnv("SLUG_CFG_knuckles_model", options.model)
+      match options.test {
+        nil => nil
+        cmd => sys.setEnv("SLUG_CFG_run_after_edit", cmd)
+      }
 
       val command = match positional {
         []         => "list"

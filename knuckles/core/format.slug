@@ -125,6 +125,8 @@ Repo: ''' + session.repoRoot + '''
 - Use remember when you discover something stable and worth keeping across turns
   (e.g. what a module does, where a key function lives, a constraint you must respect).
   Facts appear in every future prompt — keep them short, one sentence each.
+- After a successful edit the test suite may run automatically — check the result
+  before proceeding. If tests fail, fix the issue before calling done.
 
 ## Tool call format
 
