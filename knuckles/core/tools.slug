@@ -420,6 +420,72 @@ val prompt = fn(s, args) {
 }
 
 // ============================================================
+// revert — restore a file to its state before the last edit
+// ============================================================
+
+/**
+ * restores a file to its content before the most recent edit to that path.
+ *
+ * Uses the `before` field from the last matching patch in `session.patches`.
+ * After reverting, removes that patch from the session so `diff` stays accurate.
+ *
+ * Use this when:
+ * - an edit made tests go from passing to failing
+ * - an approach turned out to be wrong and you need to start over on a file
+ * - you want to try a different strategy for a file you already modified
+ *
+ * Only reverts the most recent edit to the given path. If the file was
+ * edited multiple times, call revert again to step back further.
+ *
+ * Fails if the file has not been edited in this session.
+ */
+@export
+val revert = fn(s, args) {
+  val rawPath = args["path"]
+  val r       = resolvePath(s, "revert", rawPath)
+  match r.ok {
+    false => toolErr(s, "revert", r.err)
+    true  => {
+      // find the last patch for this path
+      val patches    = s.patches
+      val lastIdx    = patches /> zipWithIndex /> reduce(-1, fn(acc, pair) {
+        match pair[0].path == rawPath { true => pair[1] false => acc }
+      })
+      match lastIdx {
+        -1 => toolErr(s, "revert",
+          "no edits found for " + rawPath + " in this session — nothing to revert"
+        )
+        _ => {
+          val patch   = patches[lastIdx]
+          // reconstruct the before content by reversing the edit
+          val current = fs.readFile(r.path)
+          val afterIdx = current /> indexOf(patch.after)
+          match afterIdx {
+            -1 => toolErr(s, "revert",
+              "cannot revert " + rawPath +
+              " — current content no longer matches the edit that was applied." +
+              " The file may have been modified outside this session."
+            )
+            _ => {
+              val restored = current[0:afterIdx] + patch.before + current[afterIdx + len(patch.after):]
+              fs.writeFile(restored, r.path)
+              // remove the reverted patch from session
+              val newPatches = patches /> zipWithIndex
+                /> filter(fn(pair) { pair[1] != lastIdx })
+                /> map(fn(pair) { pair[0] })
+              val s2 = s copy { patches: newPatches }
+              toolOk(s2, "revert",
+                "reverted: " + rawPath + " — undid \"" + patch.desc + "\""
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
 // dispatch — route an action to the correct tool
 // ============================================================
 
@@ -438,6 +504,7 @@ val dispatch = fn(s, action) {
     :grep     => grep(s,     action.args)
     :write    => write(s,    action.args)
     :edit     => edit(s,     action.args)
+    :revert   => revert(s,   action.args)
     :run      => run(s,      action.args)
     :diff     => diff(s,     action.args)
     :prompt   => prompt(s,   action.args)

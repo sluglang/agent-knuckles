@@ -127,6 +127,9 @@ Repo: ''' + session.repoRoot + '''
   Facts appear in every future prompt — keep them short, one sentence each.
 - After a successful edit the test suite may run automatically — check the result
   before proceeding. If tests fail, fix the issue before calling done.
+- If the goal asks for a report, document, or any written output, use the write
+  tool to save it as a file (e.g. REVIEW.md, NOTES.md) before calling done.
+  Never put a lengthy report only in the done summary — write it to a file first.
 - If requirements are ambiguous or a decision requires human judgement, use the
   prompt tool to ask before proceeding. One focused question per prompt call.
 
