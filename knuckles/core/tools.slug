@@ -323,6 +323,66 @@ val remember = fn(s, args) {
 }
 
 // ============================================================
+// grep — regex search across all files using system grep
+// ============================================================
+
+/**
+ * runs `grep -rn` in the repo root and returns matching lines.
+ *
+ * Unlike `find`, which does plain string matching on `.slug` files only,
+ * `grep` uses full regex, searches all file types, and is significantly
+ * faster on large repos. Use it when you need:
+ * - regex patterns (e.g. `fn\(.*session`)
+ * - cross-file symbol search (all callers, all imports)
+ * - searching non-.slug files (config, SQL, markdown)
+ *
+ * Args:
+ * - `pattern` (required) — regex pattern passed directly to grep
+ * - `path`    (optional) — directory or file to search; defaults to repo root
+ * - `flags`   (optional) — extra grep flags e.g. `-i` (case-insensitive),
+ *                          `-l` (filenames only), `-w` (whole word)
+ *
+ * Always runs with `-rn` (recursive + line numbers). Output format:
+ * `file:linenum:content` — consistent with the `find` tool.
+ *
+ * Automatically excludes `.git` and other noise directories.
+ */
+@export
+val grep = fn(s, args) {
+  val pattern = args["pattern"]
+  val rawPath = args["path"] /> ifNil(".")
+  val flags   = args["flags"] /> ifNil("")
+  val r       = resolvePath(s, "grep", rawPath)
+  match r.ok {
+    false => toolErr(s, "grep", r.err)
+    true  => {
+      val excludes = "--exclude-dir=.git --exclude-dir=.idea --exclude-dir=.vscode --exclude-dir=node_modules"
+      val flagStr  = match flags /> trim {
+        "" => ""
+        f  => " " + f
+      }
+      val cmd    = "grep -rn" + flagStr + " " + excludes + " -- " + fmt("'{}'", pattern) + " " + r.path
+      val output = execCommand(s, cmd)
+      match output /> trim {
+        "" => toolOk(s, "grep", "no matches for: " + pattern)
+        _  => {
+          // make paths relative to repoRoot for consistency with other tools
+          val rootLen = len(s.repoRoot + "/")
+          val lines   = output /> split("\n") /> filter(fn(l) { len(l /> trim) > 0 })
+          val relative = lines /> map(fn(l) {
+            match l /> startsWith(s.repoRoot + "/") {
+              true  => l[rootLen:]
+              false => l
+            }
+          })
+          toolOk(s, "grep", relative /> join("\n"))
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
 // dispatch — route an action to the correct tool
 // ============================================================
 
@@ -338,6 +398,7 @@ val dispatch = fn(s, action) {
     :read     => read(s,     action.args)
     :list     => list(s,     action.args)
     :find     => find(s,     action.args)
+    :grep     => grep(s,     action.args)
     :write    => write(s,    action.args)
     :edit     => edit(s,     action.args)
     :run      => run(s,      action.args)

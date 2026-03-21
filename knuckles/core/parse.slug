@@ -122,12 +122,13 @@ val extractArgs = fn(@str s, @list tagNames) {
 
 // --- action type detection ---
 
-val KNOWN_TOOLS = ["read", "list", "find", "write", "edit", "run", "diff", "remember", "done"]
+val KNOWN_TOOLS = ["read", "list", "find", "grep", "write", "edit", "run", "diff", "remember", "done"]
 
 val TOOL_ARGS = {
   "read":     ["path"],
   "list":     ["path"],
   "find":     ["pattern", "path"],
+  "grep":     ["pattern", "path", "flags"],
   "write":    ["path", "content"],
   "edit":     ["path", "search", "replace", "desc"],
   "run":      ["cmd"],
@@ -193,6 +194,7 @@ val REQUIRED_ARGS = {
   "read":     ["path"],
   "list":     ["path"],
   "find":     ["pattern"],
+  "grep":     ["pattern"],
   "write":    ["path", "content"],
   "edit":     ["path", "search", "replace"],
   "run":      ["cmd"],

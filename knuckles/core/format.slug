@@ -150,6 +150,12 @@ Emit exactly one tool call per response using XML tags:
 
 <tool>remember</tool><fact>knuckles.core.session owns all immutable state transforms</fact>
 
+<tool>grep</tool><pattern>addHistory</pattern>
+
+<tool>grep</tool><pattern>fn\(.*session</pattern><path>knuckles</path>
+
+<tool>grep</tool><pattern>import</pattern><flags>-l</flags>
+
 <tool>diff</tool>
 
 <tool>done</tool>
@@ -161,13 +167,18 @@ Emit exactly one tool call per response using XML tags:
 |----------|-------------------------------------------|--------------------------------------|
 | read     | path                                      | read a file                          |
 | list     | path                                      | list directory contents              |
-| find     | pattern, path (optional)                  | search for text in .slug files       |
+| find     | pattern, path (optional)                  | plain string search in .slug files   |
+| grep     | pattern, path (optional), flags (optional)| regex search across all file types   |
 | write    | path, content                             | create or overwrite a file           |
 | edit     | path, search, replace, desc               | surgical single-occurrence edit      |
 | run      | cmd                                       | run a shell command                  |
 | remember | fact                                      | store a fact that persists in prompt |
 | diff     | (none)                                    | show all changes made so far         |
 | done     | summary                                   | finish and summarise the task        |
+
+Prefer `grep` over `find` when you need regex, want to search non-.slug files, or need
+to find all callers/imports of a symbol across the whole codebase. Use `grep -l` to get
+filenames only, `-i` for case-insensitive, `-w` for whole-word matching.
 ''' + factsBlock + "\n## Slug language reference\n\n" + slugSpec +
   "\n## Module manifest\n\n" + manifest
 }
