@@ -1,12 +1,16 @@
 [knuckles]
 
+[knuckles.core.format]
+knuckles_context_threshold = 30
+knuckles_context_recent = 10
+
 [knuckles.core.tools]
 run_timeout_ms = 30000
 run_after_edit = "slug test --dir ."
 
 [knuckles.agent]
 knuckles_max_turns = 50
-knuckles_context = 20
+knuckles_context = 30
 knuckles_model = "qwen3-coder:480b-cloud"
 knuckles_slug_spec = "./data/SLUG.ai"
 knuckles_manifest = "./data/MANIFEST.ai"

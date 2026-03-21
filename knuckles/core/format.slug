@@ -127,6 +127,8 @@ Repo: ''' + session.repoRoot + '''
   Facts appear in every future prompt — keep them short, one sentence each.
 - After a successful edit the test suite may run automatically — check the result
   before proceeding. If tests fail, fix the issue before calling done.
+- If requirements are ambiguous or a decision requires human judgement, use the
+  prompt tool to ask before proceeding. One focused question per prompt call.
 
 ## Tool call format
 
@@ -150,6 +152,8 @@ Emit exactly one tool call per response using XML tags:
 
 <tool>remember</tool><fact>knuckles.core.session owns all immutable state transforms</fact>
 
+<tool>prompt</tool><question>Should the timeout be configurable or always 30 seconds?</question>
+
 <tool>grep</tool><pattern>addHistory</pattern>
 
 <tool>grep</tool><pattern>fn\(.*session</pattern><path>knuckles</path>
@@ -172,6 +176,7 @@ Emit exactly one tool call per response using XML tags:
 | write    | path, content                             | create or overwrite a file           |
 | edit     | path, search, replace, desc               | surgical single-occurrence edit      |
 | run      | cmd                                       | run a shell command                  |
+| prompt   | question                                  | ask the developer a question         |
 | remember | fact                                      | store a fact that persists in prompt |
 | diff     | (none)                                    | show all changes made so far         |
 | done     | summary                                   | finish and summarise the task        |
@@ -183,25 +188,178 @@ filenames only, `-i` for case-insensitive, `-w` for whole-word matching.
   "\n## Module manifest\n\n" + manifest
 }
 
+// --- context window compression ---
+
+val CONTEXT_THRESHOLD = cfg("knuckles_context_threshold", 30)
+val CONTEXT_RECENT    = cfg("knuckles_context_recent",    10)
+
+// Extracts the path or command argument from an assistant turn's XML tool call.
+// Used to build the "files visited" list in the compressed summary.
+val extractTurnPath = fn(@str content) {
+  val path = content /> indexOf("<path>")
+  val cmd  = content /> indexOf("<cmd>")
+  match path {
+    -1 => match cmd {
+      -1 => nil
+      _  => {
+        val start = cmd + len("<cmd>")
+        val end   = content /> indexOf("</cmd>", start)
+        match end { -1 => nil _ => content[start:end] }
+      }
+    }
+    _ => {
+      val start = path + len("<path>")
+      val end   = content /> indexOf("</path>", start)
+      match end { -1 => nil _ => content[start:end] }
+    }
+  }
+}
+
+// Extracts the tool name from an assistant turn's XML tool call.
+val extractTurnTool = fn(@str content) {
+  val start = content /> indexOf("<tool>")
+  match start {
+    -1 => nil
+    _  => {
+      val cs  = start + len("<tool>")
+      val end = content /> indexOf("</tool>", cs)
+      match end { -1 => nil _ => content[cs:end] }
+    }
+  }
+}
+
+/**
+ * builds a compact "what I've done so far" summary from old history turns
+ * and structured session state.
+ *
+ * Covers:
+ * - files and directories visited (read, list, grep, find)
+ * - commands run and their outcome
+ * - edits applied (from session.patches)
+ * - errors encountered
+ */
+val buildContextSummary = fn(session, oldTurns) {
+  // collect tool calls from old assistant turns
+  val toolCalls = oldTurns
+    /> filter(fn(t) { t.role == :assistant })
+    /> map(fn(t) {{
+      tool: extractTurnTool(t.content),
+      path: extractTurnPath(t.content),
+    }})
+    /> filter(fn(tc) { tc.tool != nil })
+
+  // files/dirs visited — read, list, grep, find
+  val visited = toolCalls
+    /> filter(fn(tc) {
+      val t = tc.tool
+      t == "read" || t == "list" || t == "grep" || t == "find"
+    })
+    /> map(fn(tc) { tc.path /> ifNil("?") })
+    /> reduce([], fn(acc, p) {
+      match acc /> find(fn(x) { x == p }) {
+        nil => acc :+ p
+        _   => acc
+      }
+    })
+
+  // commands run — from run tool calls in old turns
+  val ran = toolCalls
+    /> filter(fn(tc) { tc.tool == "run" })
+    /> map(fn(tc) { tc.path /> ifNil("?") })
+
+  // errors from old results — tool calls that returned error status
+  val errors = oldTurns
+    /> filter(fn(t) {
+      t.role == :user && t.content /> contains("status=\"error\"")
+    })
+    /> map(fn(t) {
+      val start = t.content /> indexOf("tool=\"")
+      match start {
+        -1 => "unknown tool error"
+        _  => {
+          val ts  = start + len("tool=\"")
+          val end = t.content /> indexOf("\"", ts)
+          match end { -1 => "unknown tool error" _ => t.content[ts:end] + " error" }
+        }
+      }
+    })
+
+  // build the summary block
+  val visitedBlock = match visited {
+    [] => ""
+    _  => "\n**Files/dirs visited:** " + join(visited, ", ")
+  }
+
+  val patchBlock = match session.patches {
+    [] => ""
+    ps => "\n**Edits applied:**\n" +
+      (ps /> map(fn(p) { "  - " + p.path + " — " + p.desc }) /> join("\n"))
+  }
+
+  val ranBlock = match ran {
+    [] => ""
+    _  => "\n**Commands run:** " + join(ran, ", ")
+  }
+
+  val errorBlock = match errors {
+    [] => ""
+    _  => "\n**Errors encountered:** " + join(errors, ", ")
+  }
+
+  val factsBlock = match session.facts {
+    [] => ""
+    _  => "\n**Facts remembered:** " +
+      (session.facts /> map(fn(f) { "\n  - " + f }) /> join(""))
+  }
+
+  "## What I've done so far (turns 1–" + toString(len(oldTurns)) + ")\n" +
+  visitedBlock + patchBlock + ranBlock + errorBlock + factsBlock +
+  "\n\n*Continuing from turn " + toString(session.turn - CONTEXT_RECENT) + "...*"
+}
+
 // --- conversation builder ---
 
 /**
  * builds the messages list to send to the model.
  *
- * Combines the system prompt (as a leading user message, since Ollama
- * does not support a dedicated system role in all models) with the
- * session history, keeping only the last `contextWindow` turns.
+ * When history is short (<= `knuckles_context_threshold`, default 30 turns),
+ * all turns are sent verbatim. When history grows long, turns older than
+ * the most recent `knuckles_context_recent` (default 10) are compressed
+ * into a compact summary block so the model retains awareness of what
+ * has already been done without filling the context window with raw tool
+ * output from early turns.
  *
  * The system prompt is always fresh — facts and goal state are current.
+ * The compression is ephemeral — session history is never modified.
  */
 @export
 val buildMessages = fn(session, slugSpec, manifest, contextWindow = 20) {
   val system  = buildSystemPrompt(session, slugSpec, manifest)
-  val history = session /> recentHistory(contextWindow)
-  val turns   = history /> map(fn(t) {{
-    role:    label(t.role),
-    content: t.content,
-  }})
+  val history = session.history
+  val total   = len(history)
+
+  val turns = match total > CONTEXT_THRESHOLD {
+    false => {
+      // short session — send all turns verbatim (up to contextWindow)
+      val h = match total > contextWindow {
+        true  => history[total - contextWindow:]
+        false => history
+      }
+      h /> map(fn(t) {{ role: label(t.role), content: t.content }})
+    }
+    true => {
+      // long session — compress old turns, keep recent verbatim
+      val recentCount = CONTEXT_RECENT
+      val splitAt     = total - recentCount
+      val oldTurns    = history[0:splitAt]
+      val recentTurns = history[splitAt:]
+      val summary     = buildContextSummary(session, oldTurns)
+      val summaryTurn = { role: "user", content: summary }
+      val recent      = recentTurns /> map(fn(t) {{ role: label(t.role), content: t.content }})
+      [summaryTurn] + recent
+    }
+  }
+
   [{ role: "user", content: system }] + turns
 }
 

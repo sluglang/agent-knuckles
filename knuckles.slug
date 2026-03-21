@@ -16,13 +16,14 @@
  * - `run`     start a new agent session
  * - `resume`  resume an existing session by ID
  * - `list`    show all sessions
+ * - `show`    print full turn-by-turn history for a session
  *
  * Options:
  * - `-h, --help`      show this screen
  * - `-v, --version`   show version
  * - `--goal`          task description (required for `run`)
  * - `--repo`          repository root path (default: .)
- * - `--id`            session ID (required for `resume`)
+ * - `--id`            session ID (required for `resume` and `show`)
  * - `--model`         Ollama model name (default: llama3)
  * - `--db`            SQLite database path (default: knuckles.db)
  * - `--test`          command to run after every edit (e.g. "slug test .")
@@ -130,6 +131,35 @@ val main = fn(args = argm()) {
               sys.exit(1)
             }
             id => agent.resume(id)
+          }
+        }
+        "show" => {
+          match options.id {
+            nil => {
+              println("error: --id is required for the show command")
+              sys.exit(1)
+            }
+            id => {
+              val conn = store.openDb()
+              defer { db.close(conn) }
+              match store.loadSession(conn, id) {
+                nil => {
+                  println(fmt("Session not found: {}", id))
+                  sys.exit(1)
+                }
+                { session: s } => {
+                  println(fmt("Session {} (turn {})", id, s.turn))
+                  s.history /> map(fn(turn) {
+                    val roleLabel = match turn.role {
+                      :user      => "user"
+                      :assistant => "assistant"
+                      _          => label(turn.role)
+                    }
+                    println(fmt("[{}] {}", roleLabel, turn.content))
+                  })
+                }
+              }
+            }
           }
         }
         "list" => {

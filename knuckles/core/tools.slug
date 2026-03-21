@@ -33,6 +33,7 @@ val {*} = import(
 )
 val fs      = import("slug.io.fs")
 val sys     = import("slug.sys")
+val stdin   = import("slug.io.stdin")
 val session = import("knuckles.core.session")
 
 // --- result helpers ---
@@ -341,11 +342,6 @@ val remember = fn(s, args) {
  * - `path`    (optional) — directory or file to search; defaults to repo root
  * - `flags`   (optional) — extra grep flags e.g. `-i` (case-insensitive),
  *                          `-l` (filenames only), `-w` (whole word)
- *
- * Always runs with `-rn` (recursive + line numbers). Output format:
- * `file:linenum:content` — consistent with the `find` tool.
- *
- * Automatically excludes `.git` and other noise directories.
  */
 @export
 val grep = fn(s, args) {
@@ -361,14 +357,13 @@ val grep = fn(s, args) {
         "" => ""
         f  => " " + f
       }
-      val cmd    = "grep -rn" + flagStr + " " + excludes + " -- " + fmt("'{}'", pattern) + " " + r.path
+      val cmd    = "grep -rn" + flagStr + " " + excludes + " -- '" + pattern + "' " + r.path
       val output = execCommand(s, cmd)
       match output /> trim {
         "" => toolOk(s, "grep", "no matches for: " + pattern)
         _  => {
-          // make paths relative to repoRoot for consistency with other tools
-          val rootLen = len(s.repoRoot + "/")
-          val lines   = output /> split("\n") /> filter(fn(l) { len(l /> trim) > 0 })
+          val rootLen  = len(s.repoRoot + "/")
+          val lines    = output /> split("\n") /> filter(fn(l) { len(l /> trim) > 0 })
           val relative = lines /> map(fn(l) {
             match l /> startsWith(s.repoRoot + "/") {
               true  => l[rootLen:]
@@ -378,6 +373,48 @@ val grep = fn(s, args) {
           toolOk(s, "grep", relative /> join("\n"))
         }
       }
+    }
+  }
+}
+
+// ============================================================
+// prompt — ask the developer a question and wait for their answer
+// ============================================================
+
+/**
+ * pauses execution, prints `question` to the terminal, and waits for
+ * the developer to type a response.
+ *
+ * The answer is returned as the tool result and is also automatically
+ * stored as a session fact so it persists across context window
+ * compression — answers to requirement questions are exactly the kind
+ * of stable knowledge that should survive long sessions.
+ *
+ * Use this when:
+ * - requirements are ambiguous or missing
+ * - a design decision requires human judgement
+ * - you need confirmation before a destructive or irreversible action
+ *
+ * The question should be specific and answerable — not "what should I do?"
+ * but "should the timeout default to 30s or be required?" or
+ * "should I overwrite the existing file or create a new one?"
+ */
+@export
+val prompt = fn(s, args) {
+  val question = args["question"]
+  println("")
+  println("┌─ Knuckles needs input " + padRight("", "─", 54) + "┐")
+  println("│ " + question)
+  println("└" + padRight("", "─", 77) + "┘")
+  val answer = stdin.prompt("▶ ")
+  match answer {
+    nil => toolErr(s, "prompt",
+      "no input received — session may be running non-interactively"
+    )
+    _ => {
+      val fact = "Developer answered \"" + question + "\": " + answer
+      val s2   = session.addFact(s, fact)
+      toolOk(s2, "prompt", "Developer says: " + answer)
     }
   }
 }
@@ -403,6 +440,7 @@ val dispatch = fn(s, action) {
     :edit     => edit(s,     action.args)
     :run      => run(s,      action.args)
     :diff     => diff(s,     action.args)
+    :prompt   => prompt(s,   action.args)
     :remember => remember(s, action.args)
     :error    => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
     t         => toolErr(s, "dispatch", "no tool for action type: " + label(t))
