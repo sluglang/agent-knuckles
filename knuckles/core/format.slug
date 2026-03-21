@@ -11,12 +11,13 @@
  *
  * Each agent turn produces two history entries:
  *
- * 1. **user turn** — the tool result, wrapped so the model can
- *    clearly see what the tool returned and whether it succeeded
- * 2. **assistant turn** — the model's raw response (stored as-is)
+ * 1. **assistant turn** — the model's raw response (stored as-is; contains XML tool call)
+ * 2. **user turn** — the tool result, wrapped in `<result>` tags
  *
- * The system prompt is built once at session start and is not
- * stored in history — it is prepended on every `buildPrompt` call.
+ * The system prompt is built fresh on every `buildMessages` call from
+ * `slugSpec`, `manifest`, and current session facts. It is prepended as
+ * the first message but is never stored in `session.history` — this keeps
+ * the stored history compact and free of ANSI codes or large spec content.
  */
 
 val {*} = import(
@@ -25,6 +26,28 @@ val {*} = import(
   "slug.list",
   "knuckles.core.session",
 )
+
+// Strips ANSI escape codes from a string.
+// Imported here so formatResult sanitises tool output before it enters
+// session history — defense in depth alongside the store-level sanitiser.
+val stripAnsi = fn(@str s) {
+  val esc  = fromCodePoint(27)
+  val step = fn(src, acc) {
+    val i = src /> indexOf(esc)
+    match i {
+      -1 => acc + src
+      _  => {
+        val after = src[i + 1:]
+        val end   = after /> indexOf("m")
+        match end {
+          -1 => acc + src[0:i]
+          _  => recur(after[end + 1:], acc + src[0:i])
+        }
+      }
+    }
+  }
+  step(s, "")
+}
 
 // --- tool result formatting ---
 
@@ -44,7 +67,7 @@ val {*} = import(
 val formatResult = fn(result) {
   val status = match result.ok { true => "ok" false => "error" }
   "<result tool=\"" + result.tool + "\" status=\"" + status + "\">\n" +
-  result.output + "\n" +
+  stripAnsi(result.output) + "\n" +
   "</result>"
 }
 

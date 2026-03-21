@@ -53,15 +53,55 @@ val openDb = fn() {
 
 // --- serialisation ---
 
-val sessionToRow = fn(id, s) {{
-  id:        id,
-  goal:      s.goal,
-  repo_root: s.repoRoot,
-  turn:      s.turn,
-  done:      match s.done { true => 1 false => 0 },
-  summary:   s.summary,
-  state:     json.encode(s),
-}}
+// Removes ANSI escape sequences (\033[...m) from a string so that
+// tool outputs containing terminal colour codes do not produce
+// unescaped control characters when the session is JSON-encoded.
+val stripAnsi = fn(@str s) {
+  // replace ESC character (0x1b / \033) followed by any chars up to 'm'
+  // covers the common SGR sequences used by slug.term.colour
+  val esc = fromCodePoint(27)  // ESC = \033
+  val step = fn(src, acc) {
+    val i = src /> indexOf(esc)
+    match i {
+      -1 => acc + src
+      _  => {
+        val after = src[i + 1:]
+        val end   = after /> indexOf("m")
+        match end {
+          -1 => acc + src[0:i]   // no closing m — strip from here to end
+          _  => recur(after[end + 1:], acc + src[0:i])
+        }
+      }
+    }
+  }
+  step(s, "")
+}
+
+// Sanitises a session's history content before JSON encoding.
+// Strips ANSI codes from all turn content so that control characters
+// from coloured command output cannot cause json.encode to fail.
+val sanitiseSession = fn(s) {
+  val cleanHistory = s.history /> map(fn(turn) {
+    turn copy { content: stripAnsi(turn.content) }
+  })
+  val cleanResults = s.results /> map(fn(r) {
+    r copy { output: stripAnsi(r.output) }
+  })
+  s copy { history: cleanHistory, results: cleanResults }
+}
+
+val sessionToRow = fn(id, s) {
+  val clean = sanitiseSession(s)
+  {
+    id:        id,
+    goal:      clean.goal,
+    repo_root: clean.repoRoot,
+    turn:      clean.turn,
+    done:      match clean.done { true => 1 false => 0 },
+    summary:   clean.summary,
+    state:     json.encode(clean),
+  }
+}
 
 val rowToSession = fn(row) {
   json.decode(row["state"])
