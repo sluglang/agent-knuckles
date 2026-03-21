@@ -122,17 +122,18 @@ val extractArgs = fn(@str s, @list tagNames) {
 
 // --- action type detection ---
 
-val KNOWN_TOOLS = ["read", "list", "find", "write", "edit", "run", "diff", "done"]
+val KNOWN_TOOLS = ["read", "list", "find", "write", "edit", "run", "diff", "remember", "done"]
 
 val TOOL_ARGS = {
-  "read":  ["path"],
-  "list":  ["path"],
-  "find":  ["pattern", "path"],
-  "write": ["path", "content"],
-  "edit":  ["path", "search", "replace", "desc"],
-  "run":   ["cmd"],
-  "diff":  [],
-  "done":  ["summary"],
+  "read":     ["path"],
+  "list":     ["path"],
+  "find":     ["pattern", "path"],
+  "write":    ["path", "content"],
+  "edit":     ["path", "search", "replace", "desc"],
+  "run":      ["cmd"],
+  "diff":     [],
+  "remember": ["fact"],
+  "done":     ["summary"],
 }
 
 // --- parser ---
@@ -189,14 +190,15 @@ val parseAction = fn(@str raw) {
 // --- validation ---
 
 val REQUIRED_ARGS = {
-  "read":  ["path"],
-  "list":  ["path"],
-  "find":  ["pattern"],
-  "write": ["path", "content"],
-  "edit":  ["path", "search", "replace"],
-  "run":   ["cmd"],
-  "diff":  [],
-  "done":  ["summary"],
+  "read":     ["path"],
+  "list":     ["path"],
+  "find":     ["pattern"],
+  "write":    ["path", "content"],
+  "edit":     ["path", "search", "replace"],
+  "run":      ["cmd"],
+  "diff":     [],
+  "remember": ["fact"],
+  "done":     ["summary"],
 }
 
 /**

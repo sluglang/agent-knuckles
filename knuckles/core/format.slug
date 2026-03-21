@@ -11,13 +11,12 @@
  *
  * Each agent turn produces two history entries:
  *
- * 1. **assistant turn** — the model's raw response (stored as-is; contains XML tool call)
- * 2. **user turn** — the tool result, wrapped in `<result>` tags
+ * 1. **user turn** — the tool result, wrapped so the model can
+ *    clearly see what the tool returned and whether it succeeded
+ * 2. **assistant turn** — the model's raw response (stored as-is)
  *
- * The system prompt is built fresh on every `buildMessages` call from
- * `slugSpec`, `manifest`, and current session facts. It is prepended as
- * the first message but is never stored in `session.history` — this keeps
- * the stored history compact and free of ANSI codes or large spec content.
+ * The system prompt is built once at session start and is not
+ * stored in history — it is prepended on every `buildPrompt` call.
  */
 
 val {*} = import(
@@ -27,9 +26,8 @@ val {*} = import(
   "knuckles.core.session",
 )
 
-// Strips ANSI escape codes from a string.
-// Imported here so formatResult sanitises tool output before it enters
-// session history — defense in depth alongside the store-level sanitiser.
+// Strips ANSI escape codes from a string so control characters from
+// coloured command output never enter session history.
 val stripAnsi = fn(@str s) {
   val esc  = fromCodePoint(27)
   val step = fn(src, acc) {
@@ -124,6 +122,9 @@ Repo: ''' + session.repoRoot + '''
 - When the task is complete call the done tool with a clear summary.
 - Do not guess at file contents — read first.
 - Do not modify files outside the repo root.
+- Use remember when you discover something stable and worth keeping across turns
+  (e.g. what a module does, where a key function lives, a constraint you must respect).
+  Facts appear in every future prompt — keep them short, one sentence each.
 
 ## Tool call format
 
@@ -145,6 +146,8 @@ Emit exactly one tool call per response using XML tags:
 
 <tool>run</tool><cmd>slug test src/eval.slug</cmd>
 
+<tool>remember</tool><fact>knuckles.core.session owns all immutable state transforms</fact>
+
 <tool>diff</tool>
 
 <tool>done</tool>
@@ -152,16 +155,17 @@ Emit exactly one tool call per response using XML tags:
 
 ## Available tools
 
-| Tool    | Args                                      | Purpose                          |
-|---------|-------------------------------------------|----------------------------------|
-| read    | path                                      | read a file                      |
-| list    | path                                      | list directory contents          |
-| find    | pattern, path (optional)                  | search for text in .slug files   |
-| write   | path, content                             | create or overwrite a file       |
-| edit    | path, search, replace, desc               | surgical single-occurrence edit  |
-| run     | cmd                                       | run a shell command              |
-| diff    | (none)                                    | show all changes made so far     |
-| done    | summary                                   | finish and summarise the task    |
+| Tool     | Args                                      | Purpose                              |
+|----------|-------------------------------------------|--------------------------------------|
+| read     | path                                      | read a file                          |
+| list     | path                                      | list directory contents              |
+| find     | pattern, path (optional)                  | search for text in .slug files       |
+| write    | path, content                             | create or overwrite a file           |
+| edit     | path, search, replace, desc               | surgical single-occurrence edit      |
+| run      | cmd                                       | run a shell command                  |
+| remember | fact                                      | store a fact that persists in prompt |
+| diff     | (none)                                    | show all changes made so far         |
+| done     | summary                                   | finish and summarise the task        |
 ''' + factsBlock + "\n## Slug language reference\n\n" + slugSpec +
   "\n## Module manifest\n\n" + manifest
 }

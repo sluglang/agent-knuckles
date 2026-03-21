@@ -76,8 +76,22 @@ val read = fn(s, args) {
 // list — list directory contents recursively
 // ============================================================
 
+// Directories and filename patterns that are never useful to the agent.
+val IGNORE_DIRS = [".git", ".idea", ".vscode", "node_modules", "__pycache__"]
+val IGNORE_EXTS = [".DS_Store", ".db", ".sqlite", ".zip", ".tar", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".ttf"]
+
+val isIgnored = fn(path) {
+  val ignored = IGNORE_DIRS /> find(fn(d) { path /> contains("/" + d + "/") || path /> startsWith(d + "/") })
+  val ext     = IGNORE_EXTS /> find(fn(e) { path /> endsWith(e) })
+  ignored != nil || ext != nil
+}
+
 /**
- * lists all files under `path` recursively.
+ * lists all files under `path` recursively, excluding noise directories
+ * and binary/generated files.
+ *
+ * Filters out: `.git`, `.idea`, `.vscode`, `node_modules`, `__pycache__`,
+ * database files, archives, images, and font files.
  *
  * Returns a newline-separated list of paths relative to `repoRoot`.
  * Fails if path is not a directory.
@@ -91,9 +105,11 @@ val list = fn(s, args) {
     true  => match fs.isDir(r.path) {
       false => toolErr(s, "list", "not a directory: " + rawPath)
       true  => {
-        val files = fs.listFilesRecursive([r.path])
-        val rootLen = len(s.repoRoot + "/")
-        val relative = files /> map(fn(f) { f[rootLen:] })
+        val rootLen  = len(s.repoRoot + "/")
+        val files    = fs.listFilesRecursive([r.path])
+        val relative = files
+          /> map(fn(f) { f[rootLen:] })
+          /> filter(fn(f) { !isIgnored(f) })
         toolOk(s, "list", relative /> join("\n"))
       }
     }
@@ -261,6 +277,28 @@ val diff = fn(s, args) {
 }
 
 // ============================================================
+// remember — store a durable fact in session state
+// ============================================================
+
+/**
+ * stores a fact in the session's `facts` list.
+ *
+ * Facts are injected into the system prompt on every turn so they
+ * persist across the context window. Use this to record stable
+ * discoveries that are worth remembering regardless of how long
+ * the session runs — module purposes, key function names, design
+ * decisions, constraints.
+ *
+ * Facts should be concise — one sentence each.
+ */
+@export
+val remember = fn(s, args) {
+  val fact = args["fact"]
+  val s2   = session.addFact(s, fact)
+  toolOk(s2, "remember", "remembered: " + fact)
+}
+
+// ============================================================
 // dispatch — route an action to the correct tool
 // ============================================================
 
@@ -273,14 +311,15 @@ val diff = fn(s, args) {
 @export
 val dispatch = fn(s, action) {
   match action.type {
-    :read  => read(s,  action.args)
-    :list  => list(s,  action.args)
-    :find  => find(s,  action.args)
-    :write => write(s, action.args)
-    :edit  => edit(s,  action.args)
-    :run   => run(s,   action.args)
-    :diff  => diff(s,  action.args)
-    :error => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
-    t      => toolErr(s, "dispatch", "no tool for action type: " + label(t))
+    :read     => read(s,     action.args)
+    :list     => list(s,     action.args)
+    :find     => find(s,     action.args)
+    :write    => write(s,    action.args)
+    :edit     => edit(s,     action.args)
+    :run      => run(s,      action.args)
+    :diff     => diff(s,     action.args)
+    :remember => remember(s, action.args)
+    :error    => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
+    t         => toolErr(s, "dispatch", "no tool for action type: " + label(t))
   }
 }
