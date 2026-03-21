@@ -55,7 +55,7 @@ val store   = import("knuckles.store")
 
 val MAX_TURNS   = cfg("knuckles_max_turns", 50)
 val CONTEXT     = cfg("knuckles_context",   20)
-val MODEL       = cfg("knuckles_model",     "qwen3-coder:480b-cloud")
+val MODEL       = cfg("knuckles_model",     "llama3")
 val SLUG_SPEC   = cfg("knuckles_slug_spec", "SLUG.ai")
 val MANIFEST    = cfg("knuckles_manifest",  "MANIFEST.ai")
 

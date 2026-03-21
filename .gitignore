@@ -8,7 +8,7 @@ bin/
 dist/
 
 # the agent database
-knuckles.db
+data/knuckles.db
 
 # OSX System Files
 .DS_Store

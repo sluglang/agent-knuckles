@@ -1,0 +1,15 @@
+[knuckles]
+
+[knuckles.core.tools]
+run_timeout_ms = 30000
+run_after_edit = "slug test --dir ."
+
+[knuckles.agent]
+knuckles_max_turns = 50
+knuckles_context = 20
+knuckles_model = "qwen3-coder:480b-cloud"
+knuckles_slug_spec = "./data/SLUG.ai"
+knuckles_manifest = "./data/MANIFEST.ai"
+
+[knuckles.store]
+knuckles_db = "./data/knuckles.db"
