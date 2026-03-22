@@ -85,7 +85,30 @@ val logTurn = fn(s, action) {
   ))
 }
 
-// --- core loop ---
+val gitRepo = import("knuckles.github.repo")
+
+// Returns true if there are file patches that have not yet been committed.
+// Commit patches are recorded with path "[commit]" by the git_commit tool.
+val hasUncommittedChanges = fn(s) {
+  val filePatches   = s.patches /> filter(fn(p) { p.path != "[commit]" })
+  val commitPatches = s.patches /> filter(fn(p) { p.path == "[commit]" })
+  len(filePatches) > 0 && len(commitPatches) == 0
+}
+
+// Builds a concise commit message from the session summary and patches.
+val buildCommitMessage = fn(s) {
+  val patchList = s.patches
+    /> filter(fn(p) { p.path != "[commit]" })
+    /> map(fn(p) { p.path })
+    /> reduce([], fn(acc, p) {
+      match acc /> find(fn(x) { x == p }) { nil => acc :+ p _ => acc }
+    })
+    /> join(", ")
+  match s.summary /> trim {
+    "" => "knuckles: update " + patchList
+    sm => "knuckles: " + sm[0:72]
+  }
+}
 
 val runLoop = fn(conn, id, s, slugSpec, manifest) {
   // turn limit guard
@@ -131,10 +154,27 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
             :done => {
               val summary = action.args["summary"] /> ifNil("Task complete.")
               val s3 = s2 /> session.finish(summary)
-              store.saveSession(conn, id, s3)
+
+              // auto-commit any file changes that were not explicitly committed
+              val s4 = match hasUncommittedChanges(s3) {
+                false => s3
+                true  => {
+                  val msg = buildCommitMessage(s3)
+                  println("  auto-committing changes: " + msg)
+                  defer onerror(err) {
+                    println("  ⚠ auto-commit failed: " + err.msg)
+                    s3
+                  }
+                  val result = gitRepo.commit(s3.repoRoot, msg)
+                  println("  ✓ committed: " + result.sha)
+                  session.addPatch(s3, "[commit]", "", result.sha, msg)
+                }
+              }
+
+              store.saveSession(conn, id, s4)
               println("")
-              println(format.formatSummary(s3))
-              s3
+              println(format.formatSummary(s4))
+              s4
             }
             _ => {
               // validation error — feed back to model without dispatching

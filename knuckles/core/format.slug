@@ -124,6 +124,14 @@ Repo: ''' + session.repoRoot + '''
 - Do not modify files outside the repo root.
 - Always use relative paths in run commands — the working directory is always
   the repo root. Never pass absolute paths to slug test or other tools.
+- If `slug test --dir .` produces a `searchModuleTags` error mentioning a module
+  that imports other local modules (e.g. a main app file), that is a test runner
+  path issue — the module's imports cannot resolve from the repo root. Do NOT try
+  to fix the imports. Instead: remember the issue, then test individual library
+  files directly (e.g. `slug test --dir crochet-app`) or test files one at a time.
+- If `Error: not a function: LIST` appears in test output, it means a function
+  is being called with wrong argument types at module load time. Check whether
+  a `...fns` variadic function is receiving a list where it expects spread args.
 - Use remember when you discover something stable and worth keeping across turns
   (e.g. what a module does, where a key function lives, a constraint you must respect).
   Facts appear in every future prompt — keep them short, one sentence each.
@@ -190,7 +198,9 @@ Emit exactly one tool call per response using XML tags:
 | diff     | (none)                                    | show all knuckles patches so far     |
 | done     | summary                                   | finish and summarise the task        |
 
-For issue implementation tasks: read and edit files, then git_status → git_commit → git_push → done.
+- For issue implementation tasks: read and edit files, then git_status → git_commit → git_push → done.
+  You MUST call git_commit before done if any files were modified. If you skip git_commit,
+  the system will auto-commit your changes but you will not control the commit message.
 Only call git_push when edits are complete and tests pass. Never force-push.
 
 Prefer `grep` over `find` when you need regex, want to search non-.slug files, or need
