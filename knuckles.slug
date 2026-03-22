@@ -68,6 +68,7 @@ val spec = {
     model: "str",
     db:    "str",
     test:  "str",
+    mode:  "str",
   },
   desc: {
     goal:  "task description (required for `run`)",
@@ -80,6 +81,7 @@ val spec = {
     model: "Ollama model name",
     db:    "SQLite database path",
     test:  "command to run automatically after every successful edit",
+    mode:  "prompt overlay: local | issue | review | report (default: auto)",
   },
   positional: { min: 0, max: 1, name: "command" },
 }
@@ -135,7 +137,17 @@ val main = fn(args = argm()) {
               println("error: --goal is required for the run command")
               sys.exit(1)
             }
-            goal => agent.run(goal, options.repo)
+            goal => {
+              // auto-detect report mode from goal keywords unless overridden
+              val mode = match options.mode {
+                nil => match goal /> toLower /> containsAny(["report", "document", "describe", "write a"]) {
+                  true  => :report
+                  false => :local
+                }
+                m => sym(m)
+              }
+              agent.run(goal, options.repo, mode = mode)
+            }
           }
         }
         "resume" => {
@@ -144,7 +156,7 @@ val main = fn(args = argm()) {
               println("error: --id is required for the resume command")
               sys.exit(1)
             }
-            id => agent.resume(id)
+            id => agent.resume(id, mode = :local)
           }
         }
         "show" => {
@@ -208,7 +220,7 @@ val main = fn(args = argm()) {
               println("")
 
               // run the agent loop
-              val finalSession = agent.run(goal, resolved.path)
+              val finalSession = agent.run(goal, resolved.path, mode = :issue)
 
               // push and open PR if session completed successfully
               match finalSession.done && len(finalSession.patches) > 0 {
@@ -261,7 +273,7 @@ val main = fn(args = argm()) {
               println("▶ Knuckles — reviewing PR #" + prNum + ": " + pr["title"])
               println("")
 
-              agent.run(goal, resolved.path)
+              agent.run(goal, resolved.path, mode = :review)
             }
           }
         }

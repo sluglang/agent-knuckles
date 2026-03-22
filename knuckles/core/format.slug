@@ -25,6 +25,7 @@ val {*} = import(
   "slug.list",
   "knuckles.core.session",
 )
+val fs = import("slug.io.fs")
 
 // Strips ANSI escape codes from a string so control characters from
 // coloured command output never enter session history.
@@ -84,130 +85,58 @@ val formatLastResult = fn(session) {
 
 // --- system prompt ---
 
+val PROMPTS_DIR = cfg("knuckles_prompts", "prompts")
+
+val loadPromptFile = fn(@str path) {
+  match fs.exists(path) {
+    true  => fs.readFile(path)
+    false => ""
+  }
+}
+
+val buildFactsBlock = fn(session) {
+  match session.facts {
+    [] => ""
+    fs => "## Discovered facts\n\n" +
+      (fs /> map(fn(f) { "- " + f }) /> join("\n")) + "\n"
+  }
+}
+
 /**
- * builds the system prompt for the agent.
+ * builds the system prompt for the agent from markdown files.
  *
- * The system prompt is assembled from:
- * - the agent's role and capabilities
- * - the tool call XML format with examples
- * - the current goal
- * - the repo root path
- * - any facts accumulated so far
+ * Loads `prompts/core.md` and `prompts/overlay/<mode>.md`, substitutes
+ * dynamic values (goal, repoRoot, facts), then appends the Slug language
+ * reference and module manifest.
  *
- * It is prepended to every `buildMessages` call and is not stored
- * in the session history.
+ * `mode` selects the task-specific overlay:
+ * - `:local`  — pure local session, no git operations required
+ * - `:issue`  — GitHub issue implementation, git workflow required
+ * - `:review` — GitHub PR review, github_review tool
+ * - `:report` — written report/document output
+ *
+ * The prompt files are reloaded on every call so edits take effect
+ * without restarting the agent.
  */
 @export
-val buildSystemPrompt = fn(session, slugSpec, manifest) {
-  val factsBlock = match session.facts {
-    [] => ""
-    fs => "\n## Discovered facts\n\n" + fs /> map(fn(f) { "- " + f }) /> join("\n") + "\n"
-  }
+val buildSystemPrompt = fn(session, slugSpec, manifest, mode = :local) {
+  val core    = loadPromptFile(PROMPTS_DIR + "/core.md")
+  val overlay = loadPromptFile(PROMPTS_DIR + "/overlay/" + label(mode) + ".md")
 
-  '''
-You are Knuckles, a Slug coding agent. You help developers inspect, understand,
-and modify Slug codebases through a small set of explicit tools.
+  val factsBlock = buildFactsBlock(session)
 
-## Your task
+  val filled = core
+    /> replaceAll('{{goal}}',     session.goal)
+    /> replaceAll('{{repoRoot}}', session.repoRoot)
+    /> replaceAll('{{facts}}',    factsBlock)
 
-Goal: ''' + session.goal + '''
-Repo: ''' + session.repoRoot + '''
-
-## Rules
-
-- Think step by step before calling a tool.
-- Call exactly one tool per response.
-- Always read a file before editing it.
-- For edits, make the search string unique enough to match exactly once.
-- When the task is complete call the done tool with a clear summary.
-- Do not guess at file contents — read first.
-- Do not modify files outside the repo root.
-- Always use relative paths in run commands — the working directory is always
-  the repo root. Never pass absolute paths to slug test or other tools.
-- If `slug test --dir .` produces a `searchModuleTags` error mentioning a module
-  that imports other local modules (e.g. a main app file), that is a test runner
-  path issue — the module's imports cannot resolve from the repo root. Do NOT try
-  to fix the imports. Instead: remember the issue, then test individual library
-  files directly (e.g. `slug test --dir crochet-app`) or test files one at a time.
-- If `Error: not a function: LIST` appears in test output, it means a function
-  is being called with wrong argument types at module load time. Check whether
-  a `...fns` variadic function is receiving a list where it expects spread args.
-- Use remember when you discover something stable and worth keeping across turns
-  (e.g. what a module does, where a key function lives, a constraint you must respect).
-  Facts appear in every future prompt — keep them short, one sentence each.
-- After a successful edit the test suite may run automatically — check the result
-  before proceeding. If tests fail, fix the issue before calling done.
-- If requirements are ambiguous or a decision requires human judgement, use the
-  prompt tool to ask before proceeding. One focused question per prompt call.
-
-## Tool call format
-
-Emit exactly one tool call per response using XML tags:
-
-<tool>read</tool><path>src/eval.slug</path>
-
-<tool>edit</tool><path>src/eval.slug</path>
-<search>val cache = nil</search>
-<replace>val cache = {}</replace>
-<desc>initialise cache as empty map</desc>
-
-<tool>list</tool><path>src</path>
-
-<tool>find</tool><pattern>import</pattern><path>src</path>
-
-<tool>write</tool><path>src/new.slug</path>
-<content>val x = 1</content>
-
-<tool>run</tool><cmd>slug test src/eval.slug</cmd>
-
-<tool>remember</tool><fact>knuckles.core.session owns all immutable state transforms</fact>
-
-<tool>prompt</tool><question>Should the timeout be configurable or always 30 seconds?</question>
-
-<tool>grep</tool><pattern>addHistory</pattern>
-
-<tool>grep</tool><pattern>fn\(.*session</pattern><path>knuckles</path>
-
-<tool>grep</tool><pattern>import</pattern><flags>-l</flags>
-
-<tool>diff</tool>
-
-<tool>done</tool>
-<summary>Added caching to the evaluator. Modified src/eval.slug and updated tests.</summary>
-
-## Available tools
-
-| Tool     | Args                                      | Purpose                              |
-|----------|-------------------------------------------|--------------------------------------|
-| read     | path                                      | read a file                          |
-| list     | path                                      | list directory contents              |
-| find     | pattern, path (optional)                  | plain string search in .slug files   |
-| grep     | pattern, path (optional), flags (optional)| regex search across all file types   |
-| write    | path, content                             | create or overwrite a file           |
-| edit     | path, search, replace, desc               | surgical single-occurrence edit      |
-| revert   | path                                      | undo the last edit to a file         |
-| run      | cmd                                       | run a shell command                  |
-| git_status   | (none)                                | show working tree status             |
-| git_diff     | (none)                                | show unstaged and staged changes     |
-| git_log      | n (optional)                          | show last N commits                  |
-| git_commit   | message                               | stage all changes and commit         |
-| git_push     | branch                                | push branch to origin                |
-| github_review | owner, repo, number, body, event     | post a PR review                     |
-| prompt   | question                                  | ask the developer a question         |
-| remember | fact                                      | store a fact that persists in prompt |
-| diff     | (none)                                    | show all knuckles patches so far     |
-| done     | summary                                   | finish and summarise the task        |
-
-- For issue implementation tasks: read and edit files, then git_status → git_commit → git_push → done.
-  You MUST call git_commit before done if any files were modified. If you skip git_commit,
-  the system will auto-commit your changes but you will not control the commit message.
-Only call git_push when edits are complete and tests pass. Never force-push.
-
-Prefer `grep` over `find` when you need regex, want to search non-.slug files, or need
-to find all callers/imports of a symbol across the whole codebase. Use `grep -l` to get
-filenames only, `-i` for case-insensitive, `-w` for whole-word matching.
-''' + factsBlock + "\n## Slug language reference\n\n" + slugSpec +
-  "\n## Module manifest\n\n" + manifest
+  filled +
+  match overlay /> trim {
+    "" => ""
+    _  => "\n\n" + overlay
+  } +
+  "\n\n## Slug language reference\n\n" + slugSpec +
+  "\n\n## Module manifest\n\n" + manifest
 }
 
 // --- context window compression ---
@@ -355,8 +284,8 @@ val buildContextSummary = fn(session, oldTurns) {
  * The compression is ephemeral — session history is never modified.
  */
 @export
-val buildMessages = fn(session, slugSpec, manifest, contextWindow = 20) {
-  val system  = buildSystemPrompt(session, slugSpec, manifest)
+val buildMessages = fn(session, slugSpec, manifest, contextWindow = 20, mode = :local) {
+  val system  = buildSystemPrompt(session, slugSpec, manifest, mode)
   val history = session.history
   val total   = len(history)
 

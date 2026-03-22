@@ -110,7 +110,7 @@ val buildCommitMessage = fn(s) {
   }
 }
 
-val runLoop = fn(conn, id, s, slugSpec, manifest) {
+val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
   // turn limit guard
   match s.turn >= MAX_TURNS {
     true => {
@@ -123,7 +123,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
       val s1 = session.nextTurn(s)
 
       // build messages and call the model
-      val messages  = format.buildMessages(s1, slugSpec, manifest, CONTEXT)
+      val messages  = format.buildMessages(s1, slugSpec, manifest, CONTEXT, mode)
       val response  = ollama.ollamaChat(messages, model = MODEL)
 
       // handle model failure
@@ -136,7 +136,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
           val s3 = s2 /> session.addHistory(:user, nilMsg)
           store.appendTurn(conn, id, s3.turn, :user, nilMsg)
           store.saveSession(conn, id, s3)
-          recur(conn, id, s3, slugSpec, manifest)
+          recur(conn, id, s3, slugSpec, manifest, mode)
         }
         _ => {
           // parse and validate the action
@@ -196,7 +196,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
               store.appendTurn(conn, id, s3.turn, :user, resultMsg)
               store.saveSession(conn, id, s3)
 
-              recur(conn, id, s3, slugSpec, manifest)
+              recur(conn, id, s3, slugSpec, manifest, mode)
             }
           }
         }
@@ -218,7 +218,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest) {
  * @effects('db fs net')
  */
 @export
-val run = fn(@str goal, @str repoRoot) {
+val run = fn(@str goal, @str repoRoot, mode = :local) {
   val conn     = store.openDb()
   defer { db.close(conn) }
 
@@ -230,9 +230,10 @@ val run = fn(@str goal, @str repoRoot) {
   println("▶ Knuckles session " + id)
   println("  goal: " + goal)
   println("  repo: " + repoRoot)
+  println("  mode: " + label(mode))
   println("")
 
-  runLoop(conn, id, s, slugSpec, manifest)
+  runLoop(conn, id, s, slugSpec, manifest, mode)
 }
 
 /**
@@ -246,7 +247,7 @@ val run = fn(@str goal, @str repoRoot) {
  * @effects('db fs net')
  */
 @export
-val resume = fn(@str id) {
+val resume = fn(@str id, mode = :local) {
   val conn = store.openDb()
   defer { db.close(conn) }
 
@@ -268,8 +269,9 @@ val resume = fn(@str id) {
         false => {
           println("▶ Resuming session " + id + " (turn " + s.turn + ")")
           println("  goal: " + s.goal)
+          println("  mode: " + label(mode))
           println("")
-          runLoop(conn, id, s, slugSpec, manifest)
+          runLoop(conn, id, s, slugSpec, manifest, mode)
         }
       }
     }
