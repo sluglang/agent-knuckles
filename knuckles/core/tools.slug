@@ -420,69 +420,88 @@ val prompt = fn(s, args) {
 }
 
 // ============================================================
-// revert — restore a file to its state before the last edit
+// git tools — status, diff, log, commit, push
+// ============================================================
+// These tools give the agent visibility into and control over
+// the git working tree. Clone and branch creation happen at
+// session setup time and are not available as agent tools.
+
+val gitRepo = import("knuckles.github.repo")
+
+/**
+ * shows the working tree status (modified, staged, untracked files).
+ */
+@export
+val git_status = fn(s, args) {
+  toolOk(s, "git_status", gitRepo.status(s.repoRoot))
+}
+
+/**
+ * shows the current diff (unstaged and staged changes).
+ */
+@export
+val git_diff = fn(s, args) {
+  toolOk(s, "git_diff", gitRepo.diff(s.repoRoot))
+}
+
+/**
+ * shows the last N commits on the current branch (default: 10).
+ */
+@export
+val git_log = fn(s, args) {
+  val n = args["n"] /> ifNil("10") /> toNumber /> ifNil(10)
+  toolOk(s, "git_log", gitRepo.log(s.repoRoot, n))
+}
+
+/**
+ * stages all changes and commits with the given message.
+ *
+ * Records the commit as a patch in the session for traceability.
+ */
+@export
+val git_commit = fn(s, args) {
+  val message = args["message"]
+  val result  = gitRepo.commit(s.repoRoot, message)
+  val s2      = session.addPatch(s, "[commit]", "", result.sha, message)
+  toolOk(s2, "git_commit", "committed: " + result.sha + " — " + message)
+}
+
+/**
+ * pushes the current branch to origin.
+ *
+ * Only call this when all edits are complete and tests pass.
+ */
+@export
+val git_push = fn(s, args) {
+  val branch = args["branch"]
+  val output = gitRepo.push(s.repoRoot, branch)
+  toolOk(s, "git_push", output)
+}
+
+// ============================================================
+// github_review — post a structured PR review
 // ============================================================
 
 /**
- * restores a file to its content before the most recent edit to that path.
+ * posts a review on a GitHub PR.
  *
- * Uses the `before` field from the last matching patch in `session.patches`.
- * After reverting, removes that patch from the session so `diff` stays accurate.
- *
- * Use this when:
- * - an edit made tests go from passing to failing
- * - an approach turned out to be wrong and you need to start over on a file
- * - you want to try a different strategy for a file you already modified
- *
- * Only reverts the most recent edit to the given path. If the file was
- * edited multiple times, call revert again to step back further.
- *
- * Fails if the file has not been edited in this session.
+ * Args:
+ * - `owner`   — repo owner
+ * - `repo`    — repo name
+ * - `number`  — PR number
+ * - `body`    — overall review summary
+ * - `event`   — COMMENT | APPROVE | REQUEST_CHANGES
  */
 @export
-val revert = fn(s, args) {
-  val rawPath = args["path"]
-  val r       = resolvePath(s, "revert", rawPath)
-  match r.ok {
-    false => toolErr(s, "revert", r.err)
-    true  => {
-      // find the last patch for this path
-      val patches    = s.patches
-      val lastIdx    = patches /> zipWithIndex /> reduce(-1, fn(acc, pair) {
-        match pair[0].path == rawPath { true => pair[1] false => acc }
-      })
-      match lastIdx {
-        -1 => toolErr(s, "revert",
-          "no edits found for " + rawPath + " in this session — nothing to revert"
-        )
-        _ => {
-          val patch   = patches[lastIdx]
-          // reconstruct the before content by reversing the edit
-          val current = fs.readFile(r.path)
-          val afterIdx = current /> indexOf(patch.after)
-          match afterIdx {
-            -1 => toolErr(s, "revert",
-              "cannot revert " + rawPath +
-              " — current content no longer matches the edit that was applied." +
-              " The file may have been modified outside this session."
-            )
-            _ => {
-              val restored = current[0:afterIdx] + patch.before + current[afterIdx + len(patch.after):]
-              fs.writeFile(restored, r.path)
-              // remove the reverted patch from session
-              val newPatches = patches /> zipWithIndex
-                /> filter(fn(pair) { pair[1] != lastIdx })
-                /> map(fn(pair) { pair[0] })
-              val s2 = s copy { patches: newPatches }
-              toolOk(s2, "revert",
-                "reverted: " + rawPath + " — undid \"" + patch.desc + "\""
-              )
-            }
-          }
-        }
-      }
-    }
-  }
+val github_review = fn(s, args) {
+  val pr     = import("knuckles.github.pr")
+  val owner  = args["owner"]
+  val repo   = args["repo"]
+  val number = args["number"] /> toNumber
+  val body   = args["body"]
+  val event  = args["event"] /> ifNil("COMMENT")
+  pr.postReview(owner, repo, number, body, event, [])
+  toolOk(s, "github_review", "posted " + event + " review on PR #" + number)
 }
 
 // ============================================================
@@ -498,18 +517,24 @@ val revert = fn(s, args) {
 @export
 val dispatch = fn(s, action) {
   match action.type {
-    :read     => read(s,     action.args)
-    :list     => list(s,     action.args)
-    :find     => find(s,     action.args)
-    :grep     => grep(s,     action.args)
-    :write    => write(s,    action.args)
-    :edit     => edit(s,     action.args)
-    :revert   => revert(s,   action.args)
-    :run      => run(s,      action.args)
-    :diff     => diff(s,     action.args)
-    :prompt   => prompt(s,   action.args)
-    :remember => remember(s, action.args)
-    :error    => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
-    t         => toolErr(s, "dispatch", "no tool for action type: " + label(t))
+    :read          => read(s,          action.args)
+    :list          => list(s,          action.args)
+    :find          => find(s,          action.args)
+    :grep          => grep(s,          action.args)
+    :write         => write(s,         action.args)
+    :edit          => edit(s,          action.args)
+    :revert        => revert(s,        action.args)
+    :run           => run(s,           action.args)
+    :diff          => diff(s,          action.args)
+    :prompt        => prompt(s,        action.args)
+    :remember      => remember(s,      action.args)
+    :git_status    => git_status(s,    action.args)
+    :git_diff      => git_diff(s,      action.args)
+    :git_log       => git_log(s,       action.args)
+    :git_commit    => git_commit(s,    action.args)
+    :git_push      => git_push(s,      action.args)
+    :github_review => github_review(s, action.args)
+    :error         => toolErr(s, "dispatch", action.args["msg"] /> ifNil("unknown error"))
+    t              => toolErr(s, "dispatch", "no tool for action type: " + label(t))
   }
 }

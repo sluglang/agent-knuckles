@@ -1,0 +1,191 @@
+/**
+ * knuckles.github.repo — git and GitHub repository operations
+ *
+ * Manages the local working copy for an agent session:
+ * - resolves whether to use an existing local path or clone fresh
+ * - creates the session branch
+ * - stages, commits, and pushes changes
+ *
+ * All git operations run via `slug.sys#exec` with the repo root as
+ * the working directory.
+ *
+ * ## Branch naming
+ *
+ * Branches follow the pattern `knuckles/issue-{num}-{title-slug}`.
+ * The title slug is lowercased with non-alphanumeric characters
+ * replaced by hyphens, truncated to 40 characters.
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+)
+val sys  = import("slug.sys")
+val fs   = import("slug.io.fs")
+val auth = import("knuckles.github.auth")
+
+// --- helpers ---
+
+val gitExec = fn(@str repoPath, @str cmd) {
+  val [out, err] = sys.exec("cd " + repoPath + " && " + cmd, 60000)
+  val combined   = match err /> trim {
+    "" => out
+    _  => out + "\n" + err
+  }
+  { output: combined, ok: !(combined /> contains("error:") || combined /> contains("fatal:")) }
+}
+
+val slugify = fn(@str s) {
+  s /> toLower
+    /> replaceAll(" ", "-")
+    /> replaceAll("[^a-z0-9-]", "-")
+    /> replaceAll("-+", "-")
+    /> trim("-")
+    /> fn(v) { match len(v) > 40 { true => v[0:40] false => v } }
+}
+
+// --- repo setup ---
+
+/**
+ * resolves the working repo path for a session.
+ *
+ * If `repoPath` is an existing local directory, uses it as-is.
+ * Otherwise interprets `repoPath` as `owner/repo` and clones it
+ * into a temp directory under `cfg("knuckles_workspace", "/tmp/knuckles")`.
+ *
+ * Returns `{ path, cloned, owner, name }`.
+ *
+ * @effects('fs net')
+ */
+@export
+val resolveRepo = fn(@str repoPath) {
+  match fs.exists(repoPath) && fs.isDir(repoPath) {
+    true => {
+      // local path — extract owner/name from git remote
+      val [out, _] = sys.exec("cd " + repoPath + " && git remote get-url origin", 10000)
+      val remote   = out /> trim
+      // parse owner/name from https://github.com/owner/name.git or git@github.com:owner/name.git
+      val parts    = remote /> replaceAll(".git", "") /> split("/")
+      val name     = parts[-1]
+      val owner    = parts[-2] /> replaceAll("git@github.com:", "")
+      { path: repoPath, cloned: false, owner: owner, name: name }
+    }
+    false => {
+      // treat as owner/repo — clone into workspace
+      val parts     = repoPath /> split("/")
+      val owner     = parts[0]
+      val name      = parts[1]
+      val workspace = cfg("knuckles_workspace", "/tmp/knuckles")
+      val dest      = workspace + "/" + name + "-" + randomHexString(8)
+      fs.mkDirs(dest)
+      val url       = auth.cloneUrl(owner, name)
+      val [out, err] = sys.exec("git clone " + url + " " + dest, 120000)
+      match err /> trim /> contains("fatal:") {
+        true => throw Error {
+          type: "CloneError",
+          msg:  "failed to clone " + repoPath + ": " + err,
+        }
+        false => {{ path: dest, cloned: true, owner: owner, name: name }}
+      }
+    }
+  }
+}
+
+/**
+ * creates and checks out the session branch.
+ *
+ * Branch name: `knuckles/issue-{num}-{titleSlug}`.
+ * Errors if the branch already exists (prevents accidental reuse).
+ *
+ * Returns the branch name.
+ *
+ * @effects('fs')
+ */
+@export
+val createBranch = fn(@str repoPath, @num issueNum, @str issueTitle) {
+  val slug       = slugify(issueTitle)
+  val branchName = "knuckles/issue-" + issueNum + "-" + slug
+  val result     = gitExec(repoPath, "git checkout -b " + branchName)
+  match result.ok {
+    false => throw Error {
+      type: "BranchError",
+      msg:  "failed to create branch " + branchName + ": " + result.output,
+    }
+    true => branchName
+  }
+}
+
+/**
+ * returns the current git status as a string.
+ *
+ * @effects('fs')
+ */
+@export
+val status = fn(@str repoPath) {
+  gitExec(repoPath, "git status --short").output
+}
+
+/**
+ * returns the current git diff (unstaged + staged).
+ *
+ * @effects('fs')
+ */
+@export
+val diff = fn(@str repoPath) {
+  val unstaged = gitExec(repoPath, "git diff").output
+  val staged   = gitExec(repoPath, "git diff --staged").output
+  match staged /> trim {
+    "" => unstaged
+    _  => unstaged + "\n--- staged ---\n" + staged
+  }
+}
+
+/**
+ * stages all changes and creates a commit.
+ *
+ * Returns the commit SHA.
+ *
+ * @effects('fs')
+ */
+@export
+val commit = fn(@str repoPath, @str message) {
+  gitExec(repoPath, "git add -A")
+  val result = gitExec(repoPath, "git commit -m " + fmt("'{}'", message))
+  match result.ok {
+    false => throw Error {
+      type: "CommitError",
+      msg:  "failed to commit: " + result.output,
+    }
+    true => {
+      val sha = gitExec(repoPath, "git rev-parse --short HEAD").output /> trim
+      { sha: sha, message: message }
+    }
+  }
+}
+
+/**
+ * pushes the current branch to origin.
+ *
+ * @effects('net')
+ */
+@export
+val push = fn(@str repoPath, @str branchName) {
+  val result = gitExec(repoPath, "git push -u origin " + branchName)
+  match result.ok {
+    false => throw Error {
+      type: "PushError",
+      msg:  "failed to push " + branchName + ": " + result.output,
+    }
+    true => result.output
+  }
+}
+
+/**
+ * returns the last N commits on the current branch as a string.
+ *
+ * @effects('fs')
+ */
+@export
+val log = fn(@str repoPath, @num n) {
+  gitExec(repoPath, "git log --oneline -" + n).output
+}

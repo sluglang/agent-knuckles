@@ -127,9 +127,6 @@ Repo: ''' + session.repoRoot + '''
   Facts appear in every future prompt — keep them short, one sentence each.
 - After a successful edit the test suite may run automatically — check the result
   before proceeding. If tests fail, fix the issue before calling done.
-- If the goal asks for a report, document, or any written output, use the write
-  tool to save it as a file (e.g. REVIEW.md, NOTES.md) before calling done.
-  Never put a lengthy report only in the done summary — write it to a file first.
 - If requirements are ambiguous or a decision requires human judgement, use the
   prompt tool to ask before proceeding. One focused question per prompt call.
 
@@ -178,11 +175,21 @@ Emit exactly one tool call per response using XML tags:
 | grep     | pattern, path (optional), flags (optional)| regex search across all file types   |
 | write    | path, content                             | create or overwrite a file           |
 | edit     | path, search, replace, desc               | surgical single-occurrence edit      |
+| revert   | path                                      | undo the last edit to a file         |
 | run      | cmd                                       | run a shell command                  |
+| git_status   | (none)                                | show working tree status             |
+| git_diff     | (none)                                | show unstaged and staged changes     |
+| git_log      | n (optional)                          | show last N commits                  |
+| git_commit   | message                               | stage all changes and commit         |
+| git_push     | branch                                | push branch to origin                |
+| github_review | owner, repo, number, body, event     | post a PR review                     |
 | prompt   | question                                  | ask the developer a question         |
 | remember | fact                                      | store a fact that persists in prompt |
-| diff     | (none)                                    | show all changes made so far         |
+| diff     | (none)                                    | show all knuckles patches so far     |
 | done     | summary                                   | finish and summarise the task        |
+
+For issue implementation tasks: read and edit files, then git_status → git_commit → git_push → done.
+Only call git_push when edits are complete and tests pass. Never force-push.
 
 Prefer `grep` over `find` when you need regex, want to search non-.slug files, or need
 to find all callers/imports of a symbol across the whole codebase. Use `grep -l` to get

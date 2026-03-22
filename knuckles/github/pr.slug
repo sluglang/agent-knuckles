@@ -1,0 +1,205 @@
+/**
+ * knuckles.github.pr — GitHub pull request operations
+ *
+ * Opens pull requests from completed agent sessions, reads PR diffs
+ * and review comments, and posts structured review feedback.
+ *
+ * ## PR description format
+ *
+ * PRs opened by Knuckles follow a structured template:
+ *
+ * ```
+ * ## Summary
+ * <agent summary>
+ *
+ * ## Changes
+ * - path/to/file — description of edit
+ *
+ * ## Issue
+ * Closes #<issue_num>
+ *
+ * ## Session
+ * Knuckles session <id>, <N> turns
+ * ```
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val auth = import("knuckles.github.auth")
+
+// --- PR creation ---
+
+/**
+ * builds a structured PR description from a completed session.
+ *
+ * `session`   — the completed agent session
+ * `sessionId` — the Knuckles session ID for traceability
+ * `issueNum`  — the issue number this PR closes (optional)
+ */
+@export
+val buildDescription = fn(session, @str sessionId, issueNum) {
+  val changesBlock = match session.patches {
+    [] => "_No files modified._"
+    ps => ps /> map(fn(p) { "- `" + p.path + "` — " + p.desc }) /> join("\n")
+  }
+
+  val issueBlock = match issueNum {
+    nil => ""
+    n   => "\n## Issue\n\nCloses #" + n + "\n"
+  }
+
+  "## Summary\n\n" + session.summary + "\n\n" +
+  "## Changes\n\n" + changesBlock + "\n" +
+  issueBlock + "\n" +
+  "## Session\n\nKnuckles session `" + sessionId + "`, " + session.turn + " turns\n\n" +
+  "---\n_This PR was opened automatically by [Knuckles](https://github.com/slug-lang/knuckles)._"
+}
+
+/**
+ * opens a pull request from the session branch to the base branch.
+ *
+ * `owner`      — repo owner
+ * `repo`       — repo name
+ * `head`       — source branch (e.g. `knuckles/issue-42-add-caching`)
+ * `base`       — target branch (default: `main`)
+ * `title`      — PR title
+ * `body`       — PR description (use `buildDescription`)
+ * `draft`      — open as draft PR (default: false)
+ *
+ * Returns the PR map from the GitHub API.
+ * Key fields: `number`, `html_url`, `node_id`.
+ *
+ * @effects('net')
+ */
+@export
+val openPr = fn(@str owner, @str repo, @str head, @str title, @str body, base = "main", draft = false) {
+  auth.apiPost("/repos/" + owner + "/" + repo + "/pulls", {
+    title: title,
+    body:  body,
+    head:  head,
+    base:  base,
+    draft: draft,
+  })
+}
+
+// --- PR reading ---
+
+/**
+ * fetches a PR by number.
+ *
+ * Key fields: `title`, `body`, `state`, `head.ref`, `base.ref`,
+ * `user.login`, `merged`, `draft`.
+ *
+ * @effects('net')
+ */
+@export
+val getPr = fn(@str owner, @str repo, @num number) {
+  auth.apiGet("/repos/" + owner + "/" + repo + "/pulls/" + number)
+}
+
+/**
+ * fetches the diff for a PR as a unified diff string.
+ *
+ * @effects('net')
+ */
+@export
+val getPrDiff = fn(@str owner, @str repo, @num number) {
+  val http = import("slug.io.http")
+  val headers = auth.apiHeaders() copy {
+    "Accept": "application/vnd.github.diff",
+  }
+  val resp = http.get(
+    auth.API_URL + "/repos/" + owner + "/" + repo + "/pulls/" + number,
+    headers,
+  )
+  resp.body
+}
+
+/**
+ * fetches all review comments on a PR.
+ *
+ * Returns a list of comment maps. Key fields per comment:
+ * `body`, `user.login`, `path`, `line`, `diff_hunk`.
+ *
+ * @effects('net')
+ */
+@export
+val getPrComments = fn(@str owner, @str repo, @num number) {
+  auth.apiGet("/repos/" + owner + "/" + repo + "/pulls/" + number + "/comments")
+}
+
+/**
+ * fetches all reviews on a PR.
+ *
+ * Returns a list of review maps. Key fields per review:
+ * `state` (APPROVED, CHANGES_REQUESTED, COMMENTED),
+ * `body`, `user.login`, `submitted_at`.
+ *
+ * @effects('net')
+ */
+@export
+val getPrReviews = fn(@str owner, @str repo, @num number) {
+  auth.apiGet("/repos/" + owner + "/" + repo + "/pulls/" + number + "/reviews")
+}
+
+// --- PR review ---
+
+/**
+ * posts a review on a PR.
+ *
+ * `event` is one of:
+ * - `"COMMENT"`           — general comment, no approval decision
+ * - `"APPROVE"`           — approve the PR
+ * - `"REQUEST_CHANGES"`   — request changes before merge
+ *
+ * `comments` is a list of inline comment maps, each with:
+ * - `path`     — file path
+ * - `line`     — line number
+ * - `body`     — comment text
+ *
+ * @effects('net')
+ */
+@export
+val postReview = fn(@str owner, @str repo, @num number, @str body, @str event, comments) {
+  val commentsList = comments /> ifNil([])
+  auth.apiPost("/repos/" + owner + "/" + repo + "/pulls/" + number + "/reviews", {
+    body:     body,
+    event:    event,
+    comments: commentsList,
+  })
+}
+
+/**
+ * builds a goal string for a PR review session.
+ *
+ * Formats the PR title, description, diff, and existing review comments
+ * into a structured goal the agent can work from.
+ */
+@export
+val buildReviewGoal = fn(pr, diff, comments) {
+  val number    = pr["number"]
+  val title     = pr["title"]
+  val body      = pr["body"] /> ifNil("(no description)")
+  val author    = pr["user"]["login"]
+  val headRef   = pr["head"]["ref"]
+  val baseRef   = pr["base"]["ref"]
+
+  val commentBlock = match comments {
+    [] => ""
+    _  => "\n\n## Existing Review Comments\n\n" +
+      (comments /> map(fn(c) {
+        "`" + c["path"] + ":" + c["line"] + "` **" + c["user"]["login"] + ":** " + c["body"]
+      }) /> join("\n\n"))
+  }
+
+  "## PR #" + number + ": " + title + "\n" +
+  "Author: " + author + " | " + headRef + " → " + baseRef + "\n\n" +
+  body + "\n\n" +
+  "## Diff\n\n```diff\n" + diff + "\n```" +
+  commentBlock + "\n\n" +
+  "Please review this PR. Identify any bugs, style issues, or improvements. " +
+  "Post a structured review using the github_review tool."
+}

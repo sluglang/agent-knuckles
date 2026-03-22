@@ -17,16 +17,22 @@
  * - `resume`  resume an existing session by ID
  * - `list`    show all sessions
  * - `show`    print full turn-by-turn history for a session
+ * - `issue`   start a session from a GitHub issue
+ * - `review`  review a GitHub PR
  *
  * Options:
  * - `-h, --help`      show this screen
  * - `-v, --version`   show version
  * - `--goal`          task description (required for `run`)
- * - `--repo`          repository root path (default: .)
+ * - `--repo`          repository — local path or owner/repo (default: .)
  * - `--id`            session ID (required for `resume` and `show`)
+ * - `--issue`         GitHub issue number (required for `issue`)
+ * - `--pr`            GitHub PR number (required for `review`)
+ * - `--base`          base branch for PR (default: main)
+ * - `--draft`         open PR as draft (default: false)
  * - `--model`         Ollama model name (default: llama3)
  * - `--db`            SQLite database path (default: knuckles.db)
- * - `--test`          command to run after every edit (e.g. "slug test .")
+ * - `--test`          command to run after every edit
  */
 
 val {*} = import(
@@ -55,14 +61,22 @@ val spec = {
     goal:  "str",
     repo:  "str",
     id:    "str",
+    issue: "num",
+    pr:    "num",
+    base:  "str",
+    draft: "bool",
     model: "str",
     db:    "str",
     test:  "str",
   },
   desc: {
     goal:  "task description (required for `run`)",
-    repo:  "repository root path",
+    repo:  "repository — local path or owner/repo",
     id:    "session ID (required for `resume` and `show`)",
+    issue: "GitHub issue number (required for `issue`)",
+    pr:    "GitHub PR number (required for `review`)",
+    base:  "base branch for PR",
+    draft: "open PR as draft",
     model: "Ollama model name",
     db:    "SQLite database path",
     test:  "command to run automatically after every successful edit",
@@ -166,6 +180,90 @@ val main = fn(args = argm()) {
           val conn = store.openDb()
           defer { db.close(conn) }
           store.listSessions(conn) /> printSessions
+        }
+        "issue" => {
+          match options.issue {
+            nil => {
+              println("error: --issue is required for the issue command")
+              sys.exit(1)
+            }
+            issueNum => {
+              val ghIssue = import("knuckles.github.issue")
+              val ghRepo  = import("knuckles.github.repo")
+
+              // resolve repo — local path or clone
+              val resolved = ghRepo.resolveRepo(options.repo)
+
+              // fetch issue + comments, build goal
+              val issue    = ghIssue.getIssue(resolved.owner, resolved.name, issueNum)
+              val comments = ghIssue.getComments(resolved.owner, resolved.name, issueNum)
+              val goal     = ghIssue.buildGoal(issue, comments)
+
+              // create session branch
+              val branch   = ghRepo.createBranch(resolved.path, issueNum, issue["title"])
+
+              println("▶ Knuckles — issue #" + issueNum + ": " + issue["title"])
+              println("  branch: " + branch)
+              println("  repo:   " + resolved.path)
+              println("")
+
+              // run the agent loop
+              val finalSession = agent.run(goal, resolved.path)
+
+              // push and open PR if session completed successfully
+              match finalSession.done && len(finalSession.patches) > 0 {
+                false => {
+                  println("⚠ Session ended without changes — no PR opened")
+                }
+                true => {
+                  ghRepo.push(resolved.path, branch)
+                  val ghPr   = import("knuckles.github.pr")
+                  val conn   = store.openDb()
+                  defer { db.close(conn) }
+                  val sessions = store.listSessions(conn)
+                  val sessionId = match sessions {
+                    [row, ...] => row["id"]
+                    _          => "unknown"
+                  }
+                  val prTitle = "knuckles: " + issue["title"]
+                  val prBody  = ghPr.buildDescription(finalSession, sessionId, issueNum)
+                  val prResult = ghPr.openPr(
+                    resolved.owner,
+                    resolved.name,
+                    branch,
+                    prTitle,
+                    prBody,
+                    base  = options.base /> ifNil("main"),
+                    draft = options.draft /> ifNil(false),
+                  )
+                  println("✓ PR opened: " + prResult["html_url"])
+                }
+              }
+            }
+          }
+        }
+        "review" => {
+          match options.pr {
+            nil => {
+              println("error: --pr is required for the review command")
+              sys.exit(1)
+            }
+            prNum => {
+              val ghPr   = import("knuckles.github.pr")
+              val ghRepo = import("knuckles.github.repo")
+
+              val resolved = ghRepo.resolveRepo(options.repo)
+              val pr       = ghPr.getPr(resolved.owner, resolved.name, prNum)
+              val diff     = ghPr.getPrDiff(resolved.owner, resolved.name, prNum)
+              val comments = ghPr.getPrComments(resolved.owner, resolved.name, prNum)
+              val goal     = ghPr.buildReviewGoal(pr, diff, comments)
+
+              println("▶ Knuckles — reviewing PR #" + prNum + ": " + pr["title"])
+              println("")
+
+              agent.run(goal, resolved.path)
+            }
+          }
         }
         _ => {
           println(fmt("unknown command: {}", command))

@@ -1,0 +1,89 @@
+/**
+ * knuckles.github.issue — GitHub issue reader
+ *
+ * Fetches issue metadata, body, and comments for use as agent goals.
+ * Constructs a structured goal string that the agent loop can work from.
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+  "slug.list",
+)
+val auth = import("knuckles.github.auth")
+
+/**
+ * fetches a single issue by number.
+ *
+ * Returns a map with string keys from the GitHub API response.
+ * Key fields: `title`, `body`, `number`, `state`, `user.login`,
+ * `labels[].name`, `assignees[].login`.
+ *
+ * @effects('net')
+ */
+@export
+val getIssue = fn(@str owner, @str repo, @num number) {
+  auth.apiGet("/repos/" + owner + "/" + repo + "/issues/" + number)
+}
+
+/**
+ * fetches all comments on an issue.
+ *
+ * Returns a list of comment maps. Key fields per comment:
+ * `body`, `user.login`, `created_at`.
+ *
+ * @effects('net')
+ */
+@export
+val getComments = fn(@str owner, @str repo, @num number) {
+  auth.apiGet("/repos/" + owner + "/" + repo + "/issues/" + number + "/comments")
+}
+
+/**
+ * posts a comment on an issue.
+ *
+ * @effects('net')
+ */
+@export
+val postComment = fn(@str owner, @str repo, @num number, @str body) {
+  auth.apiPost("/repos/" + owner + "/" + repo + "/issues/" + number + "/comments", {
+    body: body,
+  })
+}
+
+/**
+ * builds a structured goal string from an issue and its comments.
+ *
+ * Formats the issue title, body, labels, and all comments into a
+ * single string suitable for use as the agent session goal. This
+ * gives the model full context about what is being asked.
+ */
+@export
+val buildGoal = fn(issue, comments) {
+  val number = issue["number"]
+  val title  = issue["title"]
+  val body   = issue["body"] /> ifNil("(no description)")
+  val author = issue["user"]["login"]
+  val labels = issue["labels"]
+    /> map(fn(l) { l["name"] })
+    /> join(", ")
+
+  val labelsLine = match labels {
+    "" => ""
+    _  => "\nLabels: " + labels
+  }
+
+  val commentBlock = match comments {
+    [] => ""
+    _  => "\n\n## Comments\n\n" +
+      (comments /> map(fn(c) {
+        "**" + c["user"]["login"] + ":** " + c["body"]
+      }) /> join("\n\n"))
+  }
+
+  "## Issue #" + number + ": " + title + "\n" +
+  "Opened by: " + author +
+  labelsLine + "\n\n" +
+  body +
+  commentBlock
+}

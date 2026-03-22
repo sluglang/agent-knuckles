@@ -1,0 +1,127 @@
+/**
+ * knuckles.github.auth — GitHub API authentication
+ *
+ * Provides authenticated HTTP requests to the GitHub REST API.
+ * Authentication is via a Personal Access Token (PAT) or fine-grained
+ * token stored in `cfg("github_token")`.
+ *
+ * All requests are made to `cfg("github_api_url", "https://api.github.com")`,
+ * allowing override for GitHub Enterprise.
+ *
+ * ## Configuration
+ *
+ * | Key               | Default                      | Description              |
+ * |-------------------|------------------------------|--------------------------|
+ * | `github_token`    | (required)                   | GitHub PAT or fine-grained token |
+ * | `github_api_url`  | `https://api.github.com`     | GitHub API base URL      |
+ * | `github_username` | (optional)                   | Used for git clone auth  |
+ */
+
+val {*} = import(
+  "slug.std",
+  "slug.string",
+)
+val http = import("slug.io.http")
+val json = import("slug.json")
+
+val API_URL = cfg("github_api_url", "https://api.github.com")
+val TOKEN   = cfg("github_token",   nil)
+
+/**
+ * returns the Authorization header value for GitHub API requests.
+ *
+ * Throws if `github_token` is not configured.
+ */
+@export
+val authHeader = fn() {
+  match TOKEN {
+    nil => throw Error {
+      type: "ConfigError",
+      msg:  "github_token is not configured — set it via cfg or SLUG_CFG_github_token",
+    }
+    t => "Bearer " + t
+  }
+}
+
+/**
+ * builds standard GitHub API request headers.
+ */
+@export
+val apiHeaders = fn() {{
+  "Authorization": authHeader(),
+  "Accept":        "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "Content-Type":  "application/json",
+}}
+
+/**
+ * makes an authenticated GET request to the GitHub API.
+ *
+ * `path` is the API path e.g. `/repos/owner/repo/issues/42`.
+ * Returns the parsed JSON response body or throws on HTTP error.
+ *
+ * @effects('net')
+ */
+@export
+val apiGet = fn(@str path) {
+  val [status, body] = http.get(API_URL + path, apiHeaders())
+  match status >= 400 {
+    true => throw Error {
+      type: "GitHubApiError",
+      msg:  "GET " + path + " failed: HTTP " + status + " — " + body,
+      code: status,
+    }
+    false => json.decode(body)
+  }
+}
+
+/**
+ * makes an authenticated POST request to the GitHub API.
+ *
+ * @effects('net')
+ */
+@export
+val apiPost = fn(@str path, body) {
+  val [status, body] = http.post(json.encode(body), API_URL + path, apiHeaders())
+  match status >= 400 {
+    true => throw Error {
+      type: "GitHubApiError",
+      msg:  "POST " + path + " failed: HTTP " + status + " — " + body,
+      code: status,
+    }
+    false => json.decode(body)
+  }
+}
+
+/**
+ * makes an authenticated PATCH request to the GitHub API.
+ *
+ * @effects('net')
+ */
+@export
+val apiPatch = fn(@str path, body) {
+  val [status, body] = http.patch(json.encode(body), API_URL + path, apiHeaders())
+  match status >= 400 {
+    true => throw Error {
+      type: "GitHubApiError",
+      msg:  "PATCH " + path + " failed: HTTP " + status + " — " + body,
+      code: status,
+    }
+    false => json.decode(body)
+  }
+}
+
+/**
+ * returns the authenticated clone URL for a repo.
+ *
+ * Uses token-based auth embedded in the URL so git doesn't prompt
+ * for credentials: `https://<token>@github.com/owner/repo.git`
+ *
+ * @effects('net')
+ */
+@export
+val cloneUrl = fn(@str owner, @str repoName) {
+  val base = cfg("github_url", "https://github.com")
+  base + "/" + owner + "/" + repoName + ".git"
+    /> replaceAll("https://", "https://" + TOKEN + "@")
+}

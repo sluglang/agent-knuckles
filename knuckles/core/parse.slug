@@ -122,21 +122,27 @@ val extractArgs = fn(@str s, @list tagNames) {
 
 // --- action type detection ---
 
-val KNOWN_TOOLS = ["read", "list", "find", "grep", "write", "edit", "revert", "run", "diff", "prompt", "remember", "done"]
+val KNOWN_TOOLS = ["read", "list", "find", "grep", "write", "edit", "revert", "run", "diff", "prompt", "remember", "git_status", "git_diff", "git_log", "git_commit", "git_push", "github_review", "done"]
 
 val TOOL_ARGS = {
-  "read":     ["path"],
-  "list":     ["path"],
-  "find":     ["pattern", "path"],
-  "grep":     ["pattern", "path", "flags"],
-  "write":    ["path", "content"],
-  "edit":     ["path", "search", "replace", "desc"],
-  "revert":   ["path"],
-  "run":      ["cmd"],
-  "diff":     [],
-  "prompt":   ["question"],
-  "remember": ["fact"],
-  "done":     ["summary"],
+  "read":          ["path"],
+  "list":          ["path"],
+  "find":          ["pattern", "path"],
+  "grep":          ["pattern", "path", "flags"],
+  "write":         ["path", "content"],
+  "edit":          ["path", "search", "replace", "desc"],
+  "revert":        ["path"],
+  "run":           ["cmd"],
+  "diff":          [],
+  "prompt":        ["question"],
+  "remember":      ["fact"],
+  "git_status":    [],
+  "git_diff":      [],
+  "git_log":       ["n"],
+  "git_commit":    ["message"],
+  "git_push":      ["branch"],
+  "github_review": ["owner", "repo", "number", "body", "event"],
+  "done":          ["summary"],
 }
 
 // --- parser ---
@@ -193,18 +199,24 @@ val parseAction = fn(@str raw) {
 // --- validation ---
 
 val REQUIRED_ARGS = {
-  "read":     ["path"],
-  "list":     ["path"],
-  "find":     ["pattern"],
-  "grep":     ["pattern"],
-  "write":    ["path", "content"],
-  "edit":     ["path", "search", "replace"],
-  "revert":   ["path"],
-  "run":      ["cmd"],
-  "diff":     [],
-  "prompt":   ["question"],
-  "remember": ["fact"],
-  "done":     ["summary"],
+  "read":          ["path"],
+  "list":          ["path"],
+  "find":          ["pattern"],
+  "grep":          ["pattern"],
+  "write":         ["path", "content"],
+  "edit":          ["path", "search", "replace"],
+  "revert":        ["path"],
+  "run":           ["cmd"],
+  "diff":          [],
+  "prompt":        ["question"],
+  "remember":      ["fact"],
+  "git_status":    [],
+  "git_diff":      [],
+  "git_log":       [],
+  "git_commit":    ["message"],
+  "git_push":      ["branch"],
+  "github_review": ["owner", "repo", "number", "body", "event"],
+  "done":          ["summary"],
 }
 
 /**

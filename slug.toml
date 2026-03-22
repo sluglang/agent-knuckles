@@ -8,6 +8,14 @@ knuckles_context_recent = 10
 run_timeout_ms = 30000
 run_after_edit = "slug test --dir ."
 
+[knuckles.github.auth]
+github_api_url = "https://api.github.com"
+github_url = "https://github.com"
+github_token = ""
+
+[knuckles.github.repo]
+knuckles_workspace = "/tmp/knuckles"
+
 [knuckles.agent]
 knuckles_max_turns = 50
 knuckles_context = 30
