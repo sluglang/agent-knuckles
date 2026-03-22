@@ -122,6 +122,8 @@ Repo: ''' + session.repoRoot + '''
 - When the task is complete call the done tool with a clear summary.
 - Do not guess at file contents — read first.
 - Do not modify files outside the repo root.
+- Always use relative paths in run commands — the working directory is always
+  the repo root. Never pass absolute paths to slug test or other tools.
 - Use remember when you discover something stable and worth keeping across turns
   (e.g. what a module does, where a key function lives, a constraint you must respect).
   Facts appear in every future prompt — keep them short, one sentence each.

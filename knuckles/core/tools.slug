@@ -106,10 +106,9 @@ val list = fn(s, args) {
     true  => match fs.isDir(r.path) {
       false => toolErr(s, "list", "not a directory: " + rawPath)
       true  => {
-        val rootLen  = len(s.repoRoot + "/")
         val files    = fs.listFilesRecursive([r.path])
         val relative = files
-          /> map(fn(f) { f[rootLen:] })
+          /> map(fn(f) { session.relPath(s, f) })
           /> filter(fn(f) { !isIgnored(f) })
         toolOk(s, "list", relative /> join("\n"))
       }
@@ -362,12 +361,18 @@ val grep = fn(s, args) {
       match output /> trim {
         "" => toolOk(s, "grep", "no matches for: " + pattern)
         _  => {
-          val rootLen  = len(s.repoRoot + "/")
+          // grep outputs absolute paths — normalise to repo-relative
+          // format: /abs/path/file.slug:42:content → rel/path/file.slug:42:content
           val lines    = output /> split("\n") /> filter(fn(l) { len(l /> trim) > 0 })
           val relative = lines /> map(fn(l) {
-            match l /> startsWith(s.repoRoot + "/") {
-              true  => l[rootLen:]
-              false => l
+            val colon = l /> indexOf(":")
+            match colon {
+              -1 => l
+              _  => {
+                val filePart = l[0:colon]
+                val rest     = l[colon:]
+                session.relPath(s, filePart) + rest
+              }
             }
           })
           toolOk(s, "grep", relative /> join("\n"))

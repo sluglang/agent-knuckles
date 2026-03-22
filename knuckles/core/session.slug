@@ -198,6 +198,8 @@ val recentHistory = fn(session, @num n) {
  * returns the absolute path for a repo-relative path.
  *
  * All tool paths must be passed through this before any filesystem access.
+ * If an absolute path is given that falls under repoRoot, it is used as-is.
+ * If an absolute path outside repoRoot is given, it fails isSafePath.
  */
 @export
 val absPath = fn(session, @str path) {
@@ -205,10 +207,9 @@ val absPath = fn(session, @str path) {
     true  => session.repoRoot
     false => session.repoRoot + "/"
   }
-  // if already absolute and under repoRoot, pass through
   match path /> startsWith("/") {
-    true  => path
-    false => root + path
+    true  => path          // absolute — isSafePath will validate it
+    false => root + path   // relative — prefix with repoRoot
   }
 }
 
@@ -221,6 +222,30 @@ val absPath = fn(session, @str path) {
 val isSafePath = fn(session, @str path) {
   val abs = absPath(session, path)
   !(path /> contains("..")) && abs /> startsWith(session.repoRoot)
+}
+
+/**
+ * returns a path relative to repoRoot.
+ *
+ * If the path is already relative, returns it unchanged.
+ * If absolute and under repoRoot, strips the repoRoot prefix.
+ * Used to normalise paths before showing them to the model so it
+ * always sees consistent relative paths regardless of how a tool
+ * received the path.
+ */
+@export
+val relPath = fn(session, @str path) {
+  val root = match session.repoRoot /> endsWith("/") {
+    true  => session.repoRoot
+    false => session.repoRoot + "/"
+  }
+  match path /> startsWith(root) {
+    true  => path[len(root):]
+    false => match path /> startsWith("/") {
+      true  => path   // absolute but outside root — leave for isSafePath to reject
+      false => path   // already relative
+    }
+  }
 }
 
 // --- summary helpers ---
