@@ -25,7 +25,7 @@ survive crashes and can be resumed.
 
 ## Requirements
 
-- [Slug](https://slug-lang.com) — the Slug runtime
+- [Slug](https://sluglang.org) — the Slug runtime
 - [Ollama](https://ollama.com) or a compatible model endpoint
 - A GitHub personal access token (for issue and review commands)
 
