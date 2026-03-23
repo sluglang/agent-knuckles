@@ -7,6 +7,8 @@ Knuckles operates through a small, explicit set of tools — read, edit, run,
 grep, commit — and keeps full state in a local SQLite database so sessions
 survive crashes and can be resumed.
 
+![Agent Knuckles](docs/agent_knuckles.png)
+
 ---
 
 ## Features
