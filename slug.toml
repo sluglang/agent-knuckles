@@ -1,28 +1,32 @@
 [knuckles]
 
 [knuckles.core.format]
-knuckles_context_threshold = 30
-knuckles_context_recent = 10
-knuckles_prompts = "prompts"
+knuckles-context-threshold = 30
+knuckles-context-recent = 10
+knuckles-prompts = "__project__/prompts"
 
 [knuckles.core.tools]
-run_timeout_ms = 30000
-run_after_edit = "slug test --dir ."
+run-timeout-ms = 30000
+run-after-edit = "slug test --dir ."
 
 [knuckles.github.auth]
-github_api_url = "https://api.github.com"
-github_url = "https://github.com"
-github_token = ""
+github-api-url = "https://api.github.com"
+github-url = "https://github.com"
+github-token = ""
 
 [knuckles.github.repo]
-knuckles_workspace = "/tmp/knuckles"
+knuckles-workspace = "/tmp/knuckles"
 
 [knuckles.agent]
-knuckles_max_turns = 50
-knuckles_context = 30
-knuckles_model = "qwen3-coder:480b-cloud"
-knuckles_slug_spec = "/Users/evan/projects/slug/agentKnuckles/data/SLUG.ai"
-knuckles_manifest = "/Users/evan/projects/slug/agentKnuckles/data/MANIFEST.ai"
+knuckles-max-turns = 50
+knuckles-context = 30
+knuckles-model = "qwen3-coder:480b-cloud"
+knuckles-slug-spec = "__project__/data/SLUG.ai"
+knuckles-manifest = "__project__/data/MANIFEST.ai"
 
 [knuckles.store]
-knuckles_db = "/Users/evan/projects/slug/agentKnuckles/data/knuckles.db"
+knuckles-db = "__project__/data/knuckles.db"
+
+[slug.log]
+level = "debug"
+log-file = "__project__/knuckles.log"

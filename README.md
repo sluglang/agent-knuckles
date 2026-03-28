@@ -46,10 +46,10 @@ Edit `slug.toml` to set your model and GitHub token:
 
 ```toml
 [knuckles.agent]
-knuckles_model = "llama3"          # or qwen3-coder, deepseek-coder, etc.
+knuckles-model = "llama3"          # or qwen3-coder, deepseek-coder, etc.
 
 [knuckles.github.auth]
-github_token = "ghp_your_token_here"
+github-token = "ghp_your_token_here"
 ```
 
 ---
@@ -129,29 +129,29 @@ All options can also be set in `slug.toml` via the corresponding `cfg` keys.
 
 ```toml
 [knuckles.agent]
-knuckles_model = "llama3"
-knuckles_max_turns = 50
-knuckles_context = 30
-knuckles_slug_spec = "./data/SLUG.ai"
-knuckles_manifest = "./data/MANIFEST.ai"
+knuckles-model = "llama3"
+knuckles-max-turns = 50
+knuckles-context = 30
+knuckles-slug-spec = "./data/SLUG.ai"
+knuckles-manifest = "./data/MANIFEST.ai"
 
 [knuckles.core.tools]
-run_timeout_ms = 30000
-run_after_edit = "slug test --dir ."   # auto-run tests after every edit
+run-timeout-ms = 30000
+run-after-edit = "slug test --dir ."   # auto-run tests after every edit
 
 [knuckles.core.format]
-knuckles_context_threshold = 30   # compress history after this many turns
-knuckles_context_recent = 10   # keep this many turns verbatim
+knuckles-context-threshold = 30   # compress history after this many turns
+knuckles-context-recent = 10   # keep this many turns verbatim
 
 [knuckles.github.auth]
-github_token = ""        # GitHub PAT or fine-grained token
-github_api_url = "https://api.github.com"
+github-token = ""        # GitHub PAT or fine-grained token
+github-api-url = "https://api.github.com"
 
 [knuckles.github.repo]
-knuckles_workspace = "/tmp/knuckles"   # where repos are cloned
+knuckles-workspace = "/tmp/knuckles"   # where repos are cloned
 
 [knuckles.store]
-knuckles_db = "./data/knuckles.db"
+knuckles-db = "./data/knuckles.db"
 ```
 
 ---

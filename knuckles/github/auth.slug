@@ -3,18 +3,18 @@
  *
  * Provides authenticated HTTP requests to the GitHub REST API.
  * Authentication is via a Personal Access Token (PAT) or fine-grained
- * token stored in `cfg("github_token")`.
+ * token stored in `cfg("github-token")`.
  *
- * All requests are made to `cfg("github_api_url", "https://api.github.com")`,
+ * All requests are made to `cfg("github-api-url", "https://api.github.com")`,
  * allowing override for GitHub Enterprise.
  *
  * ## Configuration
  *
  * | Key               | Default                      | Description              |
  * |-------------------|------------------------------|--------------------------|
- * | `github_token`    | (required)                   | GitHub PAT or fine-grained token |
- * | `github_api_url`  | `https://api.github.com`     | GitHub API base URL      |
- * | `github_username` | (optional)                   | Used for git clone auth  |
+ * | `github-token`    | (required)                   | GitHub PAT or fine-grained token |
+ * | `github-api-url`  | `https://api.github.com`     | GitHub API base URL      |
+ * | `github-username` | (optional)                   | Used for git clone auth  |
  */
 
 val {*} = import(
@@ -24,20 +24,20 @@ val {*} = import(
 val http = import("slug.io.http")
 val json = import("slug.json")
 
-val API_URL = cfg("github_api_url", "https://api.github.com")
-val TOKEN   = cfg("github_token",   nil)
+val API_URL = cfg("github-api-url", "https://api.github.com")
+val TOKEN   = cfg("github-token",   nil)
 
 /**
  * returns the Authorization header value for GitHub API requests.
  *
- * Throws if `github_token` is not configured.
+ * Throws if `github-token` is not configured.
  */
 @export
 val authHeader = fn() {
   match TOKEN {
     nil => throw Error {
       type: "ConfigError",
-      msg:  "github_token is not configured — set it via cfg or SLUG_CFG_github_token",
+      msg:  "github-token is not configured — set it via cfg or SLUG_CFG_github-token",
     }
     t => "Bearer " + t
   }
@@ -121,7 +121,7 @@ val apiPatch = fn(@str path, body) {
  */
 @export
 val cloneUrl = fn(@str owner, @str repoName) {
-  val base = cfg("github_url", "https://github.com")
+  val base = cfg("github-url", "https://github.com")
   base + "/" + owner + "/" + repoName + ".git"
     /> replaceAll("https://", "https://" + TOKEN + "@")
 }

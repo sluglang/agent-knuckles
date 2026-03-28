@@ -188,7 +188,7 @@ val write = fn(s, args) {
 // Shared command execution helper used by both `run` and `edit`.
 // Runs cmd in repoRoot, returns combined stdout+stderr string.
 val execCommand = fn(s, cmd) {
-  val timeoutMs  = cfg("run_timeout_ms", 30000)
+  val timeoutMs  = cfg("run-timeout-ms", 30000)
   val cdCmd      = "cd " + s.repoRoot + " && " + cmd
   val [out, err] = sys.exec(cdCmd, timeoutMs)
   match err /> trim {
@@ -210,7 +210,7 @@ val execCommand = fn(s, cmd) {
  * string unique enough to identify exactly the right location. This
  * prevents accidental multi-site edits and forces precise context.
  *
- * On success, records the patch in the session. If `cfg("run_after_edit")`
+ * On success, records the patch in the session. If `cfg("run-after-edit")`
  * is set, that command is run automatically and its output is appended
  * to the result so the model can see whether the edit broke anything.
  */
@@ -251,7 +251,7 @@ val edit = fn(s, args) {
                     val s2 = session.addPatch(s, rawPath, search, replace, desc)
 
                     // auto-run test command if configured
-                    val testCmd    = cfg("run_after_edit", nil)
+                    val testCmd    = cfg("run-after-edit", nil)
                     val testOutput = match testCmd {
                       nil => ""
                       cmd => "\n\n[auto-run: " + cmd + "]\n" + execCommand(s2, cmd)
@@ -277,7 +277,7 @@ val edit = fn(s, args) {
  * runs a shell command synchronously and returns stdout + stderr.
  *
  * The command is executed with the repo root as working directory.
- * Timeout is controlled by `cfg("run_timeout_ms", 30000)`.
+ * Timeout is controlled by `cfg("run-timeout-ms", 30000)`.
  * Both stdout and stderr are returned regardless of exit code.
  */
 @export

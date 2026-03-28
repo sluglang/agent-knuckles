@@ -51,7 +51,7 @@ val slugify = fn(@str s) {
  *
  * If `repoPath` is an existing local directory, uses it as-is.
  * Otherwise interprets `repoPath` as `owner/repo` and clones it
- * into a temp directory under `cfg("knuckles_workspace", "/tmp/knuckles")`.
+ * into a temp directory under `cfg("knuckles-workspace", "/tmp/knuckles")`.
  *
  * Returns `{ path, cloned, owner, name }`.
  *
@@ -75,7 +75,7 @@ val resolveRepo = fn(@str repoPath) {
       val parts     = repoPath /> split("/")
       val owner     = parts[0]
       val name      = parts[1]
-      val workspace = cfg("knuckles_workspace", "/tmp/knuckles")
+      val workspace = cfg("knuckles-workspace", "/tmp/knuckles")
       val dest      = workspace + "/" + name + "-" + randomHexString(8)
       fs.mkDirs(dest)
       val url       = auth.cloneUrl(owner, name)

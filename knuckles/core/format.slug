@@ -26,6 +26,7 @@ val {*} = import(
   "knuckles.core.session",
 )
 val fs = import("slug.io.fs")
+val path = import("slug.path")
 
 // Strips ANSI escape codes from a string so control characters from
 // coloured command output never enter session history.
@@ -85,7 +86,7 @@ val formatLastResult = fn(session) {
 
 // --- system prompt ---
 
-val PROMPTS_DIR = cfg("knuckles_prompts", "prompts")
+val PROMPTS_DIR = path.localize(cfg("knuckles-prompts", "prompts"))
 
 val loadPromptFile = fn(@str path) {
   match fs.exists(path) {
@@ -141,8 +142,8 @@ val buildSystemPrompt = fn(session, slugSpec, manifest, mode = :local) {
 
 // --- context window compression ---
 
-val CONTEXT_THRESHOLD = cfg("knuckles_context_threshold", 30)
-val CONTEXT_RECENT    = cfg("knuckles_context_recent",    10)
+val CONTEXT_THRESHOLD = cfg("knuckles-context-threshold", 30)
+val CONTEXT_RECENT    = cfg("knuckles-context-recent",    10)
 
 // Extracts the path or command argument from an assistant turn's XML tool call.
 // Used to build the "files visited" list in the compressed summary.
@@ -273,9 +274,9 @@ val buildContextSummary = fn(session, oldTurns) {
 /**
  * builds the messages list to send to the model.
  *
- * When history is short (<= `knuckles_context_threshold`, default 30 turns),
+ * When history is short (<= `knuckles-context-threshold`, default 30 turns),
  * all turns are sent verbatim. When history grows long, turns older than
- * the most recent `knuckles_context_recent` (default 10) are compressed
+ * the most recent `knuckles-context-recent` (default 10) are compressed
  * into a compact summary block so the model retains awareness of what
  * has already been done without filling the context window with raw tool
  * output from early turns.

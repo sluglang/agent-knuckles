@@ -29,14 +29,14 @@
  *
  * | Key                  | Default        | Description                         |
  * |----------------------|----------------|-------------------------------------|
- * | `knuckles_db`        | `knuckles.db`  | SQLite database path                |
- * | `knuckles_model`     | `llama3`       | Ollama model name                   |
+ * | `knuckles-db`        | `knuckles.db`  | SQLite database path                |
+ * | `knuckles-model`     | `llama3`       | Ollama model name                   |
  * | `ollama_url`         | `http://localhost:11434` | Ollama base URL           |
- * | `knuckles_max_turns` | `50`           | Maximum turns before giving up      |
- * | `knuckles_context`   | `20`           | History turns sent to model         |
- * | `run_timeout_ms`     | `30000`        | Shell command timeout in ms         |
- * | `knuckles_slug_spec` | `SLUG.ai`      | Path to SLUG.ai for system prompt   |
- * | `knuckles_manifest`  | `MANIFEST.ai`  | Path to MANIFEST.ai for system prompt |
+ * | `knuckles-max-turns` | `50`           | Maximum turns before giving up      |
+ * | `knuckles-context`   | `20`           | History turns sent to model         |
+ * | `run-timeout-ms`     | `30000`        | Shell command timeout in ms         |
+ * | `knuckles-slug-spec` | `SLUG.ai`      | Path to SLUG.ai for system prompt   |
+ * | `knuckles-manifest`  | `MANIFEST.ai`  | Path to MANIFEST.ai for system prompt |
  */
 
 val {*} = import(
@@ -52,12 +52,13 @@ val parse   = import("knuckles.core.parse")
 val tools   = import("knuckles.core.tools")
 val format  = import("knuckles.core.format")
 val store   = import("knuckles.store")
+val path    = import("slug.path")
 
-val MAX_TURNS   = cfg("knuckles_max_turns", 50)
-val CONTEXT     = cfg("knuckles_context",   20)
-val MODEL       = cfg("knuckles_model",     "llama3")
-val SLUG_SPEC   = cfg("knuckles_slug_spec", "SLUG.ai")
-val MANIFEST    = cfg("knuckles_manifest",  "MANIFEST.ai")
+val MAX_TURNS   = cfg("knuckles-max-turns", 50)
+val CONTEXT     = cfg("knuckles-context",   20)
+val MODEL       = cfg("knuckles-model",     "llama3")
+val SLUG_SPEC   = path.localize(cfg("knuckles-slug-spec", "SLUG.ai"))
+val MANIFEST    = path.localize(cfg("knuckles-manifest",  "MANIFEST.ai"))
 
 // --- spec loading ---
 // Loaded once at startup; missing files degrade gracefully.

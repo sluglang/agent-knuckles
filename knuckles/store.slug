@@ -7,7 +7,7 @@
  *
  * ## Database location
  *
- * Controlled by `cfg("knuckles_db", "knuckles.db")`. Override via
+ * Controlled by `cfg("knuckles-db", "knuckles.db")`. Override via
  * config or the `--knuckles-db` CLI option.
  *
  * ## Schema
@@ -28,12 +28,13 @@ val {*} = import(
   "slug.string",
   "slug.list",
 )
+val path     = import("slug.path")
 val db       = import("slug.io.db")
 val json     = import("slug.json")
 val migrate  = import("slug.db.migration")
 val session  = import("knuckles.core.session")
 
-val DB_PATH = cfg("knuckles_db", "knuckles.db")
+val DB_PATH = path.localize(cfg("knuckles-db", "knuckles.db"))
 
 // --- connection ---
 
