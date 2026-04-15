@@ -1,4 +1,4 @@
-val { moduleName } = import("slug.std")
+val {*} = import("slug.std")
 val log = import("slug.log").logger(moduleName())
 
 val jsonrpc = import("slug.jsonrpc")
@@ -40,7 +40,7 @@ val handleOne = fn(ctx, handlers, raw) {
   defer onerror(err) {
     match err.type {
       "JsonRpcError" => ctx.replyError(nil, err.code, err.msg, err.data)
-      _ => ctx.replyError(nil, jsonrpc.INTERNAL_ERROR, "internal error", err)
+      _ => ctx.replyError(nil, jsonrpc.INTERNAL_ERROR, "internal error", errorData(err))
     }
   }
 
@@ -68,7 +68,7 @@ val dispatch = fn(ctx, handlers, request) {
   defer onerror(err) {
     match err.type {
       "JsonRpcError" => ctx.replyError(request.id, err.code, err.msg, err.data)
-      _ => ctx.replyError(request.id, jsonrpc.INTERNAL_ERROR, "internal error", err)
+      _ => ctx.replyError(request.id, jsonrpc.INTERNAL_ERROR, "internal error", errorData(err))
     }
   }
 
@@ -91,6 +91,13 @@ val dispatch = fn(ctx, handlers, request) {
       val result = handler(ctx, params)
       ctx.reply(request.id, result)
     }
+  }
+}
+
+val errorData = fn(err) {
+  {
+    type: err.type,
+    msg: err.msg,
   }
 }
 

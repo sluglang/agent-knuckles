@@ -1,3 +1,4 @@
+val {*} = import("slug.std")
 val jsonrpc = import("slug.jsonrpc")
 
 @export

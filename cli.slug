@@ -1,8 +1,12 @@
 val {*} = import(
 	'slug.std',
+  'slug.channel',
 )
+val log = import("slug.log").logger(moduleName())
 val jsonrpc = import("slug.jsonrpc")
 val stdin = import("slug.io.stdin")
+val runtime = import("slug.acp.runtime")
+val stub = import("slug.acp.stub")
 
 val newClient = fn() {
   {
@@ -18,24 +22,74 @@ val allocId = fn(client) {
   }
 }
 
-val send = fn(message) {
-  println(jsonrpc.encode(message))
+val recvOrNil = fn(ch) {
+  match recv(ch) {
+    Empty{} => nil
+    Full{value} => value
+  }
 }
 
-val readMessage = fn() {
-  val raw = stdin.readLine()
+val stdioTransport = fn() {
+  {
+    read: fn() {
+      stdin.readLine() /> log.cInfo("IN:  {}")
+    },
+    write: fn(@str line) {
+      println(line) /> log.cInfo("OUT:  {}")
+    },
+    close: fn() { nil },
+  }
+}
+
+val stubTransport = fn() {
+  val clientToServer = chan(64)
+  val serverToClient = chan(64)
+
+  val serverIo = {
+    read: fn() {
+      recvOrNil(clientToServer) /> log.cInfo("IN:  {}")
+    },
+    write: fn(@str line) {
+      send(serverToClient, log.cInfo(line, "OUT:  {}"))
+    },
+  }
+
+  spawn {
+    runtime.run(stub.handlers(), serverIo)
+    close(serverToClient)
+  }
+
+  {
+    read: fn() {
+      recvOrNil(serverToClient)
+    },
+    write: fn(@str line) {
+      send(clientToServer, line)
+    },
+    close: fn() {
+      close(clientToServer)
+    },
+  }
+}
+
+val send = fn(transport, message) {
+  transport.write(jsonrpc.encode(message))
+}
+
+val readMessage = fn(transport) {
+  val raw = transport.read()
   match raw {
     nil => nil
     _ => jsonrpc.parse(raw)
   }
 }
 
-val sendRequest = fn(client, method, params = nil) {
+val sendRequest = fn(transport, client, method, params = nil) {
   val alloc = allocId(client)
   val id = alloc.id
   val nextClient = alloc.client
 
-  send(jsonrpc.request(id, method, params))
+  send(transport, jsonrpc.request(id, method, params))
 
   {
     id: id,
@@ -111,9 +165,9 @@ val renderFinalContent = fn(content) {
   }
 }
 
-val awaitResponse = fn(requestId) {
+val awaitResponse = fn(transport, requestId) {
   val loop = fn() {
-    match readMessage() {
+    match readMessage(transport) {
       nil => nil
 
       msg => {
@@ -143,7 +197,7 @@ val awaitResponse = fn(requestId) {
   loop()
 }
 
-val promptLoop = fn(client) {
+val promptLoop = fn(transport, client) {
   println("")
   println("Knuckles CLI ready. Enter a prompt, or blank line to exit.")
 
@@ -154,7 +208,7 @@ val promptLoop = fn(client) {
       "" => nil
 
       line => {
-        val sent = sendRequest(clientState, "session/prompt", {
+        val sent = sendRequest(transport, clientState, "session/prompt", {
           sessionId: clientState.sessionId,
           prompt: [
             {
@@ -164,7 +218,7 @@ val promptLoop = fn(client) {
           ],
         })
 
-        awaitResponse(sent.id)
+        awaitResponse(transport, sent.id)
         recur(sent.client)
       }
     }
@@ -175,9 +229,25 @@ val promptLoop = fn(client) {
 
 @main
 val main = fn() {
+  val args = argm()
+  val options = args.options
+  val useStub = match [options.stub, options.transport] {
+    [true, ...] => true
+    [_, "stub"] => true
+    _ => false
+  }
+
+  val transport = match useStub {
+    true => stubTransport()
+    false => stdioTransport()
+  }
+  defer {
+    transport.close()
+  }
+
   var client = newClient()
 
-  val initSent = sendRequest(client, "initialize", {
+  val initSent = sendRequest(transport, client, "initialize", {
     protocolVersion: 1,
     clientCapabilities: {
       fs: {
@@ -194,9 +264,9 @@ val main = fn() {
     _meta: {},
   })
   client = initSent.client
-  awaitResponse(initSent.id)
+  awaitResponse(transport, initSent.id)
 
-  val newSent = sendRequest(client, "session/new", {
+  val newSent = sendRequest(transport, client, "session/new", {
     cwd: ".",
     mcpServers: [],
   })
@@ -204,7 +274,7 @@ val main = fn() {
 
   val captureSession = fn() {
     val loop = fn() {
-      match readMessage() {
+      match readMessage(transport) {
         nil => client
 
         msg => {
@@ -236,6 +306,6 @@ val main = fn() {
 
   match client.sessionId {
     nil => println("failed to create session")
-    _ => promptLoop(client)
+    _ => promptLoop(transport, client)
   }
 }
