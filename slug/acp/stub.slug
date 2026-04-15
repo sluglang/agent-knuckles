@@ -1,0 +1,90 @@
+val {*} = import(
+	"slug.std",
+	"slug.time",
+)
+val acp = import("slug.acp.types")
+
+@export
+val handlers = fn() {
+  {
+    initialize: fn(ctx, params) {
+
+      ctx.updateState(fn(state) {
+      	state
+		 /> put(:initialized, true)
+		 /> put(:clientInfo, params.clientInfo)
+		 /> put(:clientCapabilities, params.clientCapabilities)
+		 /> put(:connectionMeta, params._meta)
+      })
+
+      {
+        protocolVersion: 1,
+        agentInfo: {
+          name: "Knuckles",
+          version: "0.1.0",
+        },
+        agentCapabilities: {
+          sessions: {
+            new: true,
+            load: true,
+          },
+        },
+      }
+    },
+
+    sessionNew: fn(ctx, params) {
+		val sessionId = randId()
+		val session = {
+			id: sessionId,
+			cwd: params.cwd,
+			mcpServers: params.mcpServers,
+		}
+		ctx.putSession(sessionId, session)
+		{ sessionId: sessionId }
+    },
+
+    sessionLoad: fn(ctx, params) {
+		ctx.getSession(params.sessionId)
+      match ctx.getState().sessions[params.sessionId] {
+        nil => throw Error {
+          type: "JsonRpcError",
+          msg: "unknown session",
+          code: -32602,
+          data: { sessionId: params.sessionId },
+        }
+        s => { sessionId: s.id }
+      }
+    },
+
+    sessionPrompt: fn(ctx, params) {
+      val sid = params.sessionId
+      val text = firstPromptText(params.prompt)
+
+      ctx.sendAgentText(sid, "Thinking...")
+      ctx.sendToolCall(sid, "stub-list-1", "Listing files", { path: "." })
+      ctx.sendToolResultText(sid, "stub-list-1", "completed",
+        "./README.md\n./main.slug\n./lib/util.slug"
+      )
+      ctx.sendAgentText(sid, "Stub response for prompt: " + text)
+
+      {
+        stopReason: "end_turn",
+      }
+    },
+  }
+}
+
+val randId = fn() {
+  // replace later with real random/uuid
+  "s" + str(clockNanos())
+}
+
+val firstPromptText = fn(prompt) {
+  match prompt {
+    [] => ""
+    [part, ...] => match part.type {
+      "text" => part.text
+      _ => ""
+    }
+  }
+}

@@ -1,0 +1,241 @@
+val {*} = import(
+	'slug.std',
+)
+val jsonrpc = import("slug.jsonrpc")
+val stdin = import("slug.io.stdin")
+
+val newClient = fn() {
+  {
+    nextId: 1,
+    sessionId: nil,
+  }
+}
+
+val allocId = fn(client) {
+  {
+    id: client.nextId,
+    client: put(client, :nextId, client.nextId + 1),
+  }
+}
+
+val send = fn(message) {
+  println(jsonrpc.encode(message))
+}
+
+val readMessage = fn() {
+  val raw = stdin.readLine()
+  match raw {
+    nil => nil
+    _ => jsonrpc.parse(raw)
+  }
+}
+
+val sendRequest = fn(client, method, params = nil) {
+  val alloc = allocId(client)
+  val id = alloc.id
+  val nextClient = alloc.client
+
+  send(jsonrpc.request(id, method, params))
+
+  {
+    id: id,
+    client: nextClient,
+  }
+}
+
+val renderToolContent = fn(content) {
+  match content {
+    [] => nil
+    [part, ...rest] => {
+      match part.type {
+        "content" => match part.content.type {
+          "text" => println(part.content.text)
+          _ => nil
+        }
+        _ => nil
+      }
+      renderToolContent(rest)
+    }
+  }
+}
+
+val renderUpdate = fn(update) {
+  match update.sessionUpdate {
+    "agent_message_chunk" => {
+      match update.content.type {
+        "text" => println(update.content.text)
+        _ => println("[assistant chunk]")
+      }
+    }
+
+    "tool_call" => {
+      println("[tool] " + update.title)
+    }
+
+    "tool_call_update" => {
+      println("[tool:" + update.status + "] " + update.toolCallId)
+      match update.content {
+        nil => nil
+        c => renderToolContent(c)
+      }
+    }
+
+    other => {
+      println("[update] " + other)
+    }
+  }
+}
+
+val renderResult = fn(result) {
+  match result.content {
+    nil => nil
+    xs => renderFinalContent(xs)
+  }
+
+  match result.stopReason {
+    nil => nil
+    s => println("[" + s + "]")
+  }
+}
+
+val renderFinalContent = fn(content) {
+  match content {
+    [] => nil
+    [part, ...rest] => {
+      match part.type {
+        "text" => println(part.text)
+        _ => nil
+      }
+      renderFinalContent(rest)
+    }
+  }
+}
+
+val awaitResponse = fn(requestId) {
+  val loop = fn() {
+    match readMessage() {
+      nil => nil
+
+      msg => {
+        if (jsonrpc.isResponse(msg)) {
+          if (msg.id == requestId) {
+            match msg.error {
+              nil => renderResult(msg.result)
+              e => println("[error] " + e.message)
+            }
+            nil
+          } else {
+            recur()
+          }
+        } else {
+          match msg.method {
+            "session/update" => {
+              renderUpdate(msg.params.update)
+              recur()
+            }
+            _ => recur()
+          }
+        }
+      }
+    }
+  }
+
+  loop()
+}
+
+val promptLoop = fn(client) {
+  println("")
+  println("Knuckles CLI ready. Enter a prompt, or blank line to exit.")
+
+  val loop = fn(clientState) {
+    print("> ")
+    match stdin.readLine() {
+      nil => nil
+      "" => nil
+
+      line => {
+        val sent = sendRequest(clientState, "session/prompt", {
+          sessionId: clientState.sessionId,
+          prompt: [
+            {
+              type: "text",
+              text: line,
+            },
+          ],
+        })
+
+        awaitResponse(sent.id)
+        recur(sent.client)
+      }
+    }
+  }
+
+  loop(client)
+}
+
+@main
+val main = fn() {
+  var client = newClient()
+
+  val initSent = sendRequest(client, "initialize", {
+    protocolVersion: 1,
+    clientCapabilities: {
+      fs: {
+        readTextFile: true,
+        writeTextFile: true,
+      },
+      terminal: false,
+    },
+    clientInfo: {
+      name: "Knuckles CLI",
+      version: "0.1.0",
+      title: "Knuckles CLI",
+    },
+    _meta: {},
+  })
+  client = initSent.client
+  awaitResponse(initSent.id)
+
+  val newSent = sendRequest(client, "session/new", {
+    cwd: ".",
+    mcpServers: [],
+  })
+  client = newSent.client
+
+  val captureSession = fn() {
+    val loop = fn() {
+      match readMessage() {
+        nil => client
+
+        msg => {
+          if (jsonrpc.isResponse(msg) && msg.id == newSent.id) {
+            match msg.error {
+              nil => put(client, :sessionId, msg.result.sessionId)
+              e => {
+                println("[error] " + e.message)
+                client
+              }
+            }
+          } else {
+            match msg.method {
+              "session/update" => {
+                renderUpdate(msg.params.update)
+                recur()
+              }
+              _ => recur()
+            }
+          }
+        }
+      }
+    }
+
+    loop()
+  }
+
+  client = captureSession()
+
+  match client.sessionId {
+    nil => println("failed to create session")
+    _ => promptLoop(client)
+  }
+}

@@ -81,6 +81,7 @@ val sys     = import("slug.sys")
 val db      = import("slug.io.db")
 val stdin   = import("slug.io.stdin")
 val json    = import("slug.json")
+val log     = import("slug.log").logger(moduleName())
 val agent   = import("knuckles.agent")
 val store   = import("knuckles.store")
 val session = import("knuckles.core.session")
@@ -98,17 +99,12 @@ val PROTOCOL_VERSION = 1
 // JSON-RPC transport — newline-delimited over stdio
 // ============================================================
 
-val writeLog = fn(msg) {
-  appendFile(msg + "\n", path.localize('__project__/knuckles_out.txt'))
-  msg
-}
-
 val writeMsg = fn(msg) {
   // ACP uses newline-delimited JSON over stdout
   msg
   /> json.encode
-  /> writeLog
-  /> fn(v) {print(v + "\n") }
+  /> log.cInfo("OUT: {}")
+  /> fn(v) {println(v) }
 }
 
 val rpcResponse = fn(id, result) {{
@@ -140,8 +136,8 @@ val sendThought = fn(sessionId, thought) {
     t  => writeMsg(rpcNotification("session/update", {
       sessionId: sessionId,
       update: {
-        kind: "agent_thought_chunk",
-        content: { thought: t },
+        sessionUpdate: "agent_message_chunk",
+        content: { type: 'text', text: t },
       },
     }))
   }
@@ -192,10 +188,10 @@ val sendAssistantMessage = fn(sessionId, text) {
   writeMsg(rpcNotification("session/update", {
     sessionId: sessionId,
     update: {
-      kind:    "agent_message_chunk",
+      sessionUpdate:    "agent_message_chunk",
       content: {
-        role:    "assistant",
-        content: [{ type: "text", text: text }],
+        type:    "text",
+        text: text,
       },
     },
   }))
@@ -246,6 +242,7 @@ val runAcpLoop = fn(conn, acpSessionId, knucklesId, s, slugSpec, manifest, mode,
     true => {
       val s2 = session.finish(s, "Turn limit reached. Task incomplete.")
       store.saveSession(conn, knucklesId, s2)
+      sendAssistantMessage(acpSessionId, "Turn limit reached. Task incomplete.")
       s2
     }
     false => {
@@ -443,9 +440,13 @@ val handleSessionPrompt = fn(id, params, conn, sessions) {
         )
         put(sessions, sid, put(entry, :session, finalSession ))
         // send final response to complete the session/prompt request
+       // PromptResponse contains ONLY stopReason — content is sent via
+        // session/update notifications during processing, not here.
+        // Valid stopReason values: "end_turn" | "cancelled" | "max_tokens" |
+        //                          "max_turn_requests" | "refusal"
         writeMsg(rpcResponse(id, {
-          content: [{ type: "text", text: finalSession.summary /> ifNil("Done.") }],
-          stopReason: match finalSession.done { true => "done" _ => "cancelled" },
+//           content: [{ type: "text", text: finalSession.summary /> ifNil("Done.") }],
+          stopReason: match finalSession.done { true => "end_turn" _ => "cancelled" },
         }))
       }
     }
@@ -490,7 +491,7 @@ val serve = fn() {
   defer { db.close(conn) }
   var sessions = {}   // acpSessionId → { session, cwd, cancelChan }
   fn() {
-    val line = readLine() /> writeLog
+    val line = readLine() /> log.cDebug('IN:  {}')
     match line {
       nil => nil   // stdin closed — exit
       ""  => recur()

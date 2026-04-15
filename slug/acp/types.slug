@@ -1,0 +1,78 @@
+val jsonrpc = import("slug.jsonrpc")
+
+@export
+val sessionUpdate = fn(@str sessionId, @map update) {
+  jsonrpc.notification("session/update", {
+    sessionId: sessionId,
+    update: update,
+  })
+}
+
+@export
+val agentMessageChunk = fn(@str text) {
+  {
+    sessionUpdate: "agent_message_chunk",
+    content: {
+      type: "text",
+      text: text,
+    },
+  }
+}
+
+@export
+val toolCall = fn(@str toolCallId, @str title, rawInput = nil, kind = "other") {
+  val base = {
+    sessionUpdate: "tool_call",
+    toolCallId: toolCallId,
+    title: title,
+    kind: kind,
+    status: "pending",
+  }
+
+  match rawInput {
+    nil => base
+    _ => base /> put("rawInput", rawInput)
+  }
+}
+
+@export
+val toolCallUpdate = fn(@str toolCallId, @str status, content = nil) {
+  val base = {
+    sessionUpdate: "tool_call_update",
+    toolCallId: toolCallId,
+    status: status,
+  }
+  match content {
+    nil => base
+    _ => base /> put("content", content)
+  }
+}
+
+@export
+val textContent = fn(@str text) {
+  {
+    type: "text",
+    text: text,
+  }
+}
+
+@export
+val toolResultTextContent = fn(@str text) {
+  [
+    {
+      type: "content",
+      content: textContent(text),
+    },
+  ]
+}
+
+@export
+val endTurn = fn(content = nil) {
+  match content {
+    nil => { stopReason: "end_turn" }
+    _ => {{
+      content: content,
+      stopReason: "end_turn",
+    }}
+  }
+}

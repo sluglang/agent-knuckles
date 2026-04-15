@@ -1,0 +1,226 @@
+val { moduleName } = import("slug.std")
+val log = import("slug.log").logger(moduleName())
+
+val jsonrpc = import("slug.jsonrpc")
+val acp = import("slug.acp.types")
+
+@export
+val defaultHandlers = fn() {
+  {
+    initialize: nil,
+    sessionNew: nil,
+    sessionLoad: nil,
+    sessionPrompt: nil,
+  }
+}
+
+@export
+val run = fn(@map handlers, @map io = nil) {
+  val actualIo = match io {
+    nil => stdio()
+    _ => io
+  }
+
+  val ctx = newContext(newState(), actualIo)
+
+  val loop = fn() {
+    match actualIo.read() {
+      nil => nil
+      raw => {
+        handleOne(ctx, handlers, raw)
+        recur()
+      }
+    }
+  }
+
+  loop()
+}
+
+val handleOne = fn(ctx, handlers, raw) {
+  defer onerror(err) {
+    match err.type {
+      "JsonRpcError" => ctx.replyError(nil, err.code, err.msg, err.data)
+      _ => ctx.replyError(nil, jsonrpc.INTERNAL_ERROR, "internal error", err)
+    }
+  }
+
+  val message = jsonrpc.parse(raw)
+
+  if (!jsonrpc.isRequest(message)) {
+    log.warn("ignored notifications/responses from the client: {}", message)
+    nil
+  } else {
+    dispatch(ctx, handlers, message)
+  }
+}
+
+val handlerFor = fn(handlers, @str method) {
+  match method {
+    "initialize" => handlers.initialize
+    "session/new" => handlers.sessionNew
+    "session/load" => handlers.sessionLoad
+    "session/prompt" => handlers.sessionPrompt
+    _ => nil
+  }
+}
+
+val dispatch = fn(ctx, handlers, request) {
+  defer onerror(err) {
+    match err.type {
+      "JsonRpcError" => ctx.replyError(request.id, err.code, err.msg, err.data)
+      _ => ctx.replyError(request.id, jsonrpc.INTERNAL_ERROR, "internal error", err)
+    }
+  }
+
+  val method = request.method
+  val params = match request.params {
+    nil => {}
+    _ => request.params
+  }
+
+  val handler = handlerFor(handlers, method)
+
+  match handler {
+    nil => ctx.replyError(
+      request.id,
+      jsonrpc.METHOD_NOT_FOUND,
+      "method not found: " + method
+    )
+
+    _ => {
+      val result = handler(ctx, params)
+      ctx.reply(request.id, result)
+    }
+  }
+}
+
+@export
+val newContext = fn(@map state, @map io) {
+  var currentState = state
+  {
+    io: io,
+
+    getState: fn() {
+      currentState
+    },
+
+    setState: fn(@map nextState) {
+      currentState = nextState
+    },
+
+    updateState: fn(@fun f) {
+      currentState = f(currentState)
+    },
+
+    hasSession: fn(sessionId) {
+    	currentState.sessions[sessionId] != nil
+    },
+
+	findSession: fn(sessionId) {
+	  currentState.sessions[sessionId]
+	},
+
+    getSession: fn(sessionId) {
+      match currentState.sessions[sessionId] {
+        nil => throw Error {
+          type: "JsonRpcError",
+          msg: "unknown session",
+          code: -32602,
+          data: { sessionId: sessionId },
+        }
+        s => s
+      }
+    },
+
+    putSession: fn(sessionId, session) {
+		currentState = put(currentState, :sessions, put(currentState.sessions, sessionId, session))
+    },
+
+    updateSessionState: fn(sessionId, @fun f) {
+        val session = getSession(sessionId)
+        putSession(sessionId, f(session))
+    },
+
+    write: fn(message) {
+      io.write(jsonrpc.encode(message))
+    },
+
+    notify: fn(@str method, params = nil) {
+      jsonrpc.notification(method, params)
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    updateSession: fn(@str sessionId, @map update) {
+      acp.sessionUpdate(sessionId, update)
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    reply: fn(id, result = nil) {
+      jsonrpc.success(id, result)
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    replyError: fn(id, @num code, @str message, data = nil) {
+      jsonrpc.failure(id, code, message, data)
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    sendAgentText: fn(@str sessionId, @str text) {
+      acp.agentMessageChunk(text)
+      /> fn(update) { acp.sessionUpdate(sessionId, update) }
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    sendToolCall: fn(@str sessionId, @str toolCallId, @str title, rawInput = nil) {
+      acp.toolCall(toolCallId, title, rawInput)
+      /> fn(update) { acp.sessionUpdate(sessionId, update) }
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+
+    sendToolResultText: fn(@str sessionId, @str toolCallId, @str status, @str text) {
+      acp.toolCallUpdate(toolCallId, status, [
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: text,
+          },
+        },
+      ])
+      /> fn(update) { acp.sessionUpdate(sessionId, update) }
+      /> jsonrpc.encode()
+      /> io.write()
+    },
+  }
+}
+
+val newState = fn() {
+  {
+    initialized: false,
+    clientInfo: nil,
+    clientCapabilities: {},
+    connectionMeta: {},
+    sessions: {},
+  }
+}
+
+@export
+val stdio = fn() {
+  val stdin = import("slug.io.stdin")
+
+  {
+    read: fn() {
+      stdin.readLine()
+    },
+
+    write: fn(@str s) {
+      println(s)
+    },
+  }
+}
