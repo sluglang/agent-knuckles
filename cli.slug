@@ -32,10 +32,10 @@ val recvOrNil = fn(ch) {
 val stdioTransport = fn() {
   {
     read: fn() {
-      stdin.readLine() /> log.cInfo("IN:  {}")
+      stdin.readLine() /> log.cInfo("STDIN:  {}")
     },
     write: fn(@str line) {
-      println(line) /> log.cInfo("OUT:  {}")
+      line /> log.cInfo("STDOUT: {}") /> println()
     },
     close: fn() { nil },
   }
@@ -47,10 +47,10 @@ val stubTransport = fn() {
 
   val serverIo = {
     read: fn() {
-      recvOrNil(clientToServer) /> log.cInfo("IN:  {}")
+      recvOrNil(clientToServer) /> log.cInfo("STUB OUT: {}")
     },
     write: fn(@str line) {
-      send(serverToClient, log.cInfo(line, "OUT:  {}"))
+      send(serverToClient, log.cInfo(line, "STUB IN:  {}"))
     },
   }
 
