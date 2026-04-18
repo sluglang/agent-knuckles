@@ -1,0 +1,24 @@
+val {*} = import(
+	'slug.std',
+)
+val log = import("slug.log").logger(moduleName())
+val stubServer = import("slug.acp.stub-server")
+val stdin = import("slug.io.stdin")
+
+@main
+val main = fn() {
+  stubServer.serve(stdio())
+}
+
+val stdio = fn() {
+
+  {
+    read: fn() {
+      stdin.readLine() /> log.cInfo("<- {}")
+    },
+
+    write: fn(@str s) {
+      println(log.cInfo(s, "-> {}"))
+    },
+  }
+}

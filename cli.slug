@@ -5,8 +5,7 @@ val {*} = import(
 val log = import("slug.log").logger(moduleName())
 val jsonrpc = import("slug.jsonrpc")
 val stdin = import("slug.io.stdin")
-val runtime = import("slug.acp.runtime")
-val stub = import("slug.acp.stub")
+val stubServer = import("slug.acp.stub-server")
 
 val newClient = fn() {
   {
@@ -55,7 +54,7 @@ val stubTransport = fn() {
   }
 
   spawn {
-    runtime.run(stub.handlers(), serverIo)
+    stubServer.serve(serverIo)
     close(serverToClient)
   }
 

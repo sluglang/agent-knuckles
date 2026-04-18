@@ -1,0 +1,12 @@
+val runtime = import("slug.acp.runtime")
+val stub = import("slug.acp.stub")
+
+@export
+val serve = fn(io = nil) {
+  runtime.run(stub.handlers(), io)
+}
+
+@main
+val main = fn() {
+  serve()
+}
