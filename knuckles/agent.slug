@@ -142,21 +142,35 @@ val dispatchTool = fn(s, action, valErr, ask) {
 }
 
 val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local, hooks = {}) {
-  val onTurn = hooks["onTurn"] /> ifNil(fn() {fn(s, action) { logTurn(s, action) }})
-  val onThought = hooks["onThought"] /> ifNil(fn() {fn(s, thought, action) { nil }})
-  val onToolStart = hooks["onToolStart"] /> ifNil(fn() {fn(s, action) { nil }})
-  val onToolResult = hooks["onToolResult"] /> ifNil(fn() {fn(s, action, toolResult, patch) { nil }})
-  val onDone = hooks["onDone"] /> ifNil(fn() {fn(s) {
+  val onTurn = hooks.onTurn
+    /> ifNil(hooks["onTurn"])
+    /> ifNil(fn() {fn(s, action) { logTurn(s, action) }})
+  val onThought = hooks.onThought
+    /> ifNil(hooks["onThought"])
+    /> ifNil(fn() {fn(s, thought, action) { nil }})
+  val onToolStart = hooks.onToolStart
+    /> ifNil(hooks["onToolStart"])
+    /> ifNil(fn() {fn(s, action) { nil }})
+  val onToolResult = hooks.onToolResult
+    /> ifNil(hooks["onToolResult"])
+    /> ifNil(fn() {fn(s, action, toolResult, patch) { nil }})
+  val onDone = hooks.onDone
+    /> ifNil(hooks["onDone"])
+    /> ifNil(fn() {fn(s) {
     println("")
     println(format.formatSummary(s))
   }})
-  val onLimit = hooks["onLimit"] /> ifNil(fn() {fn(s, message) {
+  val onLimit = hooks.onLimit
+    /> ifNil(hooks["onLimit"])
+    /> ifNil(fn() {fn(s, message) {
     println("⚠ " + message)
   }})
-  val onModelNil = hooks["onModelNil"] /> ifNil(fn() {fn(s) {
+  val onModelNil = hooks.onModelNil
+    /> ifNil(hooks["onModelNil"])
+    /> ifNil(fn() {fn(s) {
     println("✗ Model returned nil — retrying next turn")
   }})
-  val ask = hooks["ask"]
+  val ask = hooks.ask /> ifNil(hooks["ask"])
 
   // turn limit guard
   match s.turn >= MAX_TURNS {
