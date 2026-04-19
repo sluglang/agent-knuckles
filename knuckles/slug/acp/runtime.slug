@@ -223,11 +223,11 @@ val stdio = fn() {
 
   {
     read: fn() {
-      stdin.readLine() /> log.cDebug("<- {}")
+      stdin.readLine()
     },
 
     write: fn(@str s) {
-      println(log.cDebug(s, "-> {}"))
+      println(s)
     },
   }
 }

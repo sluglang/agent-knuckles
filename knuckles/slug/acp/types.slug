@@ -70,7 +70,7 @@ val toolResultTextContent = fn(@str text) {
 @export
 val endTurn = fn(content = nil) {
   match content {
-    nil => {{ stopReason: "end_turn" }}
+    nil => { stopReason: "end_turn" }
     _ => {{
       content: content,
       stopReason: "end_turn",
