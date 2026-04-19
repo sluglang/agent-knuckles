@@ -1,524 +1,202 @@
-/**
- * knuckles.acp — Agent Client Protocol server
- *
- * Exposes Knuckles as an ACP-compatible agent so it can be used directly
- * inside any supporting IDE (Zed, JetBrains AI Assistant, Neovim, etc.)
- * without custom editor extensions.
- *
- * ## Protocol
- *
- * ACP is JSON-RPC 2.0 over stdio. The IDE spawns this module as a subprocess
- * and communicates via stdin/stdout. Each JSON message is newline-delimited.
- *
- * Knuckles implements the following ACP methods:
- *
- * | Method                    | Direction      | Description                        |
- * |---------------------------|----------------|------------------------------------|
- * | `initialize`              | client → agent | Handshake, capability exchange     |
- * | `session/new`             | client → agent | Start a new Knuckles session       |
- * | `session/prompt`          | client → agent | Send a goal / follow-up message    |
- * | `session/cancel`          | client → agent | Cancel the running turn            |
- * | `session/update`          | agent → client | Stream turn-by-turn progress       |
- * | `session/request_permission` | agent → client | Ask user to confirm a tool call |
- *
- * ## Session mapping
- *
- * Each ACP session corresponds to a Knuckles session in the SQLite database.
- * The ACP `sessionId` is the Knuckles session ID (16-char hex). Sessions
- * survive IDE restarts — the IDE can pass a previously-seen `sessionId` to
- * `session/new` to resume from where it left off.
- *
- * ## Streaming updates
- *
- * Each Knuckles tool call produces a sequence of `session/update` notifications:
- *
- * 1. `tool_call_start`  — tool name and args, rendered as a thought
- * 2. `tool_call_result` — tool output (diff for edits, text for others)
- * 3. `agent_message_chunk` — the model's reasoning / thought text
- *
- * The `session/prompt` response is only sent after the agent calls `done`,
- * at which point the full session summary is returned as the final message.
- *
- * ## IDE configuration
- *
- * ### Zed (~/.config/zed/settings.json)
- * ```json
- * {
- *   "agent_servers": {
- *     "Agent Knuckles": {
- *       "type": "custom",
- *       "command": "/path/to/slug",
- *       "args": ["knuckles.slug", "acp"],
- *       "env": { "SLUG_CFG_github-token": "ghp_..." }
- *     }
- *   }
- * }
- * ```
- *
- * ### JetBrains (~/.jetbrains/acp.json)
- * ```json
- * {
- *   "agent_servers": {
- *     "Agent Knuckles": {
- *       "command": "/path/to/slug",
- *       "args": ["knuckles.slug", "acp"],
- *       "env": { "SLUG_CFG_github-token": "ghp_..." }
- *     }
- *   }
- * }
- * ```
- */
-
 val {*} = import(
   "slug.std",
   "slug.string",
   "slug.list",
-  "slug.json",
-  "slug.io.fs",
-  "slug.channel",
 )
-val sys     = import("slug.sys")
-val db      = import("slug.io.db")
-val stdin   = import("slug.io.stdin")
-val json    = import("slug.json")
 val log     = import("slug.log").logger(moduleName())
+val db      = import("slug.io.db")
+val jsonrpc = import("slug.jsonrpc")
+val runtime = import("slug.acp.runtime")
+val acp     = import("slug.acp.types")
 val agent   = import("knuckles.agent")
 val store   = import("knuckles.store")
 val session = import("knuckles.core.session")
 val format  = import("knuckles.core.format")
-val parse   = import("knuckles.core.parse")
-val tools   = import("knuckles.core.tools")
 
-val path = import('slug.path')
-
-val AGENT_NAME    = "Knuckles"
+val AGENT_NAME = "Knuckles"
 val AGENT_VERSION = "0.1.0"
 val PROTOCOL_VERSION = 1
 
-// ============================================================
-// JSON-RPC transport — newline-delimited over stdio
-// ============================================================
-
-val writeMsg = fn(msg) {
-  // ACP uses newline-delimited JSON over stdout
-  msg
-  /> json.encode
-  /> log.cInfo("OUT: {}")
-  /> fn(v) {println(v) }
+val firstPromptText = fn(prompt) {
+log.debug("p: {}", prompt)
+  prompt
+  /> ifNil([])
+  /> find(fn(part) { part["type"] == "text" })
+  /> ifNil({})
+  /> fn(part) { part["text"] /> ifNil("") }
 }
 
-val rpcResponse = fn(id, result) {{
-  jsonrpc: "2.0",
-  id:      id,
-  result:  result,
-}}
-
-val rpcError = fn(id, code, message) {{
-  jsonrpc: "2.0",
-  id:      id,
-  error:   { code: code, message: message },
-}}
-
-val rpcNotification = fn(method, params) {{
-  jsonrpc: "2.0",
-  method:  method,
-  params:  params,
-}}
-
-// ============================================================
-// session/update notification helpers
-// ============================================================
-
-// Streams the model's thought text (content before the tool call XML)
-val sendThought = fn(sessionId, thought) {
-  match thought /> trim {
-    "" => nil
-    t  => writeMsg(rpcNotification("session/update", {
-      sessionId: sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: 'text', text: t },
-      },
-    }))
-  }
-}
-
-// Announces a tool call is starting
-val sendToolStart = fn(sessionId, toolName, args) {
-  writeMsg(rpcNotification("session/update", {
-    sessionId: sessionId,
-    update: {
-      kind:    "tool_call_start",
-      content: {
-        id:    toolName + "-" + randomHexString(4),
-        name:  toolName,
-        input: args,
-      },
-    },
-  }))
-}
-
-// Sends the result of a tool call.
-// For edits, uses the ACP diff content type so the IDE renders a diff view.
-val sendToolResult = fn(sessionId, toolName, ok, output, patch) {
-  val content = match toolName == "edit" && patch != nil {
-    true => [{
-      type:    "diff",
-      old:     patch.before,
-      new:     patch.after,
-      path:    patch.path,
-    }]
-    false => [{
-      type: "text",
-      text: output,
-    }]
-  }
-  writeMsg(rpcNotification("session/update", {
-    sessionId: sessionId,
-    update: {
-      kind:    "tool_call_result",
-      content: content,
-      isError: !ok,
-    },
-  }))
-}
-
-// Sends the final assistant message when done
-val sendAssistantMessage = fn(sessionId, text) {
-  writeMsg(rpcNotification("session/update", {
-    sessionId: sessionId,
-    update: {
-      sessionUpdate:    "agent_message_chunk",
-      content: {
-        type:    "text",
-        text: text,
-      },
-    },
-  }))
-}
-
-// ============================================================
-// Permission requests — maps Knuckles prompt tool to ACP
-// ============================================================
-
-// Sends a session/request_permission request to the IDE for the prompt tool.
-// Blocks until the user responds. Returns the user's answer string.
-val requestPermission = fn(id, sessionId, question) {
-  writeMsg({
-    jsonrpc: "2.0",
-    id:      id,
-    method:  "session/request_permission",
-    params: {
-      sessionId: sessionId,
-      permission: {
-        type:        "run_tool",
-        tool:        "prompt",
-        description: question,
-        options: [
-          { id: "answer", label: "Answer" },
-        ],
-      },
-    },
-  })
-  // The response will come back as a JSON-RPC response on stdin
-  // with the matching id — handled by the message dispatch loop
-  nil
-}
-
-// ============================================================
-// ACP-aware agent loop
-// ============================================================
-
-// Runs the Knuckles agent loop, emitting session/update notifications
-// for each turn rather than printing to the terminal.
-// Returns the completed session.
-val runAcpLoop = fn(conn, acpSessionId, knucklesId, s, slugSpec, manifest, mode, cancelChan) {
-  val MAX_TURNS = cfg("knuckles-max-turns", 50)
-  val CONTEXT   = cfg("knuckles-context",   20)
-  val MODEL     = cfg("knuckles-model",     "qwen3-coder:480b-cloud")
-  val ollama    = import("slug.thirdparty.ollama")
-
-  match s.turn >= MAX_TURNS {
-    true => {
-      val s2 = session.finish(s, "Turn limit reached. Task incomplete.")
-      store.saveSession(conn, knucklesId, s2)
-      sendAssistantMessage(acpSessionId, "Turn limit reached. Task incomplete.")
-      s2
-    }
-    false => {
-      // check for cancellation
-      match tryRecv(cancelChan) {
-        Full{} => {
-          val s2 = session.finish(s, "Cancelled by user.")
-          store.saveSession(conn, knucklesId, s2)
-          s2
-        }
-        _ => {
-          val s1       = session.nextTurn(s)
-          val messages = format.buildMessages(s1, slugSpec, manifest, CONTEXT, mode)
-          val response = ollama.ollamaChat(messages, model = MODEL)
-
-          match response {
-            nil => {
-              val s2 = s1 /> session.addHistory(:assistant, "[no response]")
-              store.appendTurn(conn, knucklesId, s2.turn, :assistant, "[no response]")
-              store.saveSession(conn, knucklesId, s2)
-              recur(conn, acpSessionId, knucklesId, s2, slugSpec, manifest, mode, cancelChan)
-            }
-            _ => {
-              val action = parse.parseAction(response)
-              val valErr = parse.validateAction(action)
-
-              // stream thought to IDE
-              sendThought(acpSessionId, action.thought)
-
-              val s2 = s1 /> session.addHistory(:assistant, response)
-              store.appendTurn(conn, knucklesId, s2.turn, :assistant, response)
-
-              match action.type {
-                :done => {
-                  val summary = action.args["summary"] /> ifNil("Task complete.")
-
-                  // auto-commit if needed (same logic as agent.slug)
-                  val gitRepo = import("knuckles.github.repo")
-                  val hasUncommitted = s2.patches /> find(fn(p) { p.path != "[commit]" }) != nil
-                    && s2.patches /> find(fn(p) { p.path == "[commit]" }) == nil
-                  val s3 = match hasUncommitted && mode == :issue {
-                    false => s2 /> session.finish(summary)
-                    true  => {
-                      val msg    = "knuckles: " + summary[0:72]
-                      val result = gitRepo.commit(s2.repoRoot, msg)
-                      s2 /> session.addPatch("[commit]", "", result.sha, msg)
-                         /> session.finish(summary)
-                    }
-                  }
-
-                  store.saveSession(conn, knucklesId, s3)
-                  sendAssistantMessage(acpSessionId, format.formatSummary(s3))
-                  s3
-                }
-                _ => {
-                  // announce tool call to IDE
-                  sendToolStart(acpSessionId, label(action.type), action.args)
-
-                  // handle prompt tool via ACP permission request instead of stdin
-                  val toolResult = match action.type == :prompt && valErr == nil {
-                    true => {
-                      // IDE handles this interactively — for now fall back to stdin
-                      // TODO: wire permission request/response via msg dispatch loop
-                      tools.dispatch(s2, action)
-                    }
-                    false => match valErr {
-                      nil => tools.dispatch(s2, action)
-                      msg => {{ ok: false, output: msg, session: s2 }}
-                    }
-                  }
-
-                  // find the last patch if this was an edit (for diff rendering)
-                  val lastPatch = match action.type == :edit && toolResult.ok {
-                    true  => toolResult.session.patches[-1]
-                    false => nil
-                  }
-
-                  sendToolResult(
-                    acpSessionId,
-                    label(action.type),
-                    toolResult.ok,
-                    toolResult.output,
-                    lastPatch,
-                  )
-
-                  val resultMsg = format.formatResult({
-                    tool:   label(action.type),
-                    ok:     toolResult.ok,
-                    output: toolResult.output,
-                  })
-                  val s3 = toolResult.session
-                    /> session.addHistory(:user, resultMsg)
-                  store.appendTurn(conn, knucklesId, s3.turn, :user, resultMsg)
-                  store.saveSession(conn, knucklesId, s3)
-
-                  recur(conn, acpSessionId, knucklesId, s3, slugSpec, manifest, mode, cancelChan)
-                }
-              }
-            }
-          }
-        }
-      }
+val detectMode = fn(goal, entry, currentSession) {
+  val text = goal /> toLower
+  match text /> containsAny("review", "report", "describe") {
+    true => :report
+    false => match currentSession.goal /> contains("issue #") {
+      true => :issue
+      false => entry["mode"] /> ifNil(:local)
     }
   }
 }
 
-// ============================================================
-// ACP method handlers
-// ============================================================
-
-val handleInitialize = fn(id) {
-  writeMsg(rpcResponse(id, {
-    protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: {
-      sessions: {
-        new:  true,
-        load: true,
-      },
-    },
-    agentInfo: {
-      name:    AGENT_NAME,
-      version: AGENT_VERSION,
-    },
-  }))
-}
-
-val handleSessionNew = fn(id, params, conn, sessions) {
-  val cwd       = params["cwd"] /> ifNil(".")
-  val sessionId = params["sessionId"]
-
-  // resume existing session if ID provided and found
-  val existing = match sessionId {
-    nil => nil
-    sid => store.loadSession(conn, sid)
-  }
-
-  match existing {
-    { id: sid, session: s } => {
-      // resume
-      writeMsg(rpcResponse(id, { sessionId: sid }))
-      put(sessions, sid, { session: s, cancelChan: chan() })
+val loadSessionOrThrow = fn(conn, sid) {
+  match store.loadSession(conn, sid) {
+    nil => throw Error {
+      type: "JsonRpcError",
+      code: jsonrpc.INVALID_PARAMS,
+      msg: "unknown session",
+      data: { sessionId: sid },
     }
-    _ => {
-      // new session — goal comes in the first session/prompt
-      val sid = randomHexString(16)
-      writeMsg(rpcResponse(id, { sessionId: sid }))
-      put(sessions, sid, { session: nil, cwd: cwd, cancelChan: chan() })
-    }
+    loaded => loaded
   }
 }
 
-val handleSessionPrompt = fn(id, params, conn, sessions) {
-  val sid     = params["sessionId"]
-  val content = params["content"] /> ifNil([])
-  val goal    = content /> find(fn(c) { c["type"] == "text" })
-    /> ifNil({}) /> fn(c) { c["text"] /> ifNil("") }
-
-  val entry = sessions[sid]
-  match entry {
-    nil => writeMsg(rpcError(id, -32600, "session not found: " + sid))
-    _   => {
-      val cancelChan = entry.cancelChan
-
-      // detect mode from goal text
-      val mode = match goal /> toLower /> containsAny("report", "review", "describe") {
-        true  => :report
-        false => match entry.session != nil && entry.session.goal /> contains("issue #") {
-          true  => :issue
-          false => :local
-        }
-      }
-
-      val slugSpec = match exists("data/SLUG.ai")     { true => readFile("data/SLUG.ai")     false => "" }
-      val manifest = match exists("data/MANIFEST.ai") { true => readFile("data/MANIFEST.ai") false => "" }
-
-      // create or resume session
-      val { knucklesId, s } = match entry.session {
-        nil => {
-          val created = store.createSession(conn, goal, entry.cwd)
-          { knucklesId: created.id, s: created.session }
-        }
-        existing => {
-          { knucklesId: sid, s: existing }
-        }
-      }
-
-      // update sessions map with live session state
-      put(sessions, sid, put(entry, :session, s ))
-
-      // run the loop in a spawned task so the message loop stays responsive
-      spawn {
-        val finalSession = runAcpLoop(
-          conn, sid, knucklesId, s,
-          slugSpec, manifest, mode, cancelChan
-        )
-        put(sessions, sid, put(entry, :session, finalSession ))
-        // send final response to complete the session/prompt request
-       // PromptResponse contains ONLY stopReason — content is sent via
-        // session/update notifications during processing, not here.
-        // Valid stopReason values: "end_turn" | "cancelled" | "max_tokens" |
-        //                          "max_turn_requests" | "refusal"
-        writeMsg(rpcResponse(id, {
-//           content: [{ type: "text", text: finalSession.summary /> ifNil("Done.") }],
-          stopReason: match finalSession.done { true => "end_turn" _ => "cancelled" },
-        }))
-      }
-    }
-  }
-}
-
-val handleSessionCancel = fn(params, sessions) {
-  val sid   = params["sessionId"]
-  val entry = sessions[sid]
-  match entry {
-    nil => nil
-    _   => send(entry.cancelChan, :cancel)
-  }
-}
-
-// ============================================================
-// Main message dispatch loop
-// ============================================================
-
-val readLine = fn() {
-	defer onerror(err) nil
-	stdin.readLines()
-	/> recv
-	/> match {
-		Full{value} => value
-		_ => nil
-	}
-}
-
-/**
- * starts the ACP server on stdio.
- *
- * Reads newline-delimited JSON-RPC messages from stdin, dispatches them
- * to the appropriate handler, and writes responses to stdout.
- * Runs until stdin closes (IDE terminates the subprocess).
- *
- * @effects('io net db')
- */
 @export
-val serve = fn() {
-  val conn     = store.openDb()
-  defer { db.close(conn) }
-  var sessions = {}   // acpSessionId → { session, cwd, cancelChan }
-  fn() {
-    val line = readLine() /> log.cDebug('IN:  {}')
-    match line {
-      nil => nil   // stdin closed — exit
-      ""  => recur()
-      _   => {
-        defer onerror(err) {
-        // {"method":"initialize", "id":"123"}
-          // malformed JSON or handler error — log to stderr, keep running
-          import("slug.sys").setEnv("_", "")   // no-op to satisfy defer onerror shape
-          recur()
-        }
-        val msg    = json.decode(line)
-        val method = msg["method"]
-        val id     = msg["id"]
-        val params = msg["params"] /> ifNil({})
-
-        match method {
-          "initialize"      => handleInitialize(id)
-          "session/new"     => sessions = handleSessionNew(id, params, conn, sessions)
-          "session/prompt"  => handleSessionPrompt(id, params, conn, sessions)
-          "session/cancel"  => handleSessionCancel(params, sessions)
-          _ => match id {
-            nil => nil   // unknown notification — ignore
-            _   => writeMsg(rpcError(id, -32601, "method not found: " + method))
-          }
-        }
-        recur()
+val handlers = fn() {
+  {
+    initialize: fn(ctx, params) {
+      {
+        protocolVersion: PROTOCOL_VERSION,
+        agentInfo: {
+          name: AGENT_NAME,
+          version: AGENT_VERSION,
+        },
+        agentCapabilities: {
+          sessions: {
+            new: true,
+            load: true,
+          },
+        },
       }
-    }
-  }()
+    },
+
+    sessionNew: fn(ctx, params) {
+      val sid = params["sessionId"] /> ifNil(randomHexString(16))
+      val cwd = params["cwd"] /> ifNil(".")
+      ctx.putSession(sid, {
+        id: sid,
+        cwd: cwd,
+        mode: :local,
+        knucklesId: nil,
+        session: nil,
+      })
+      { sessionId: sid }
+    },
+
+    sessionLoad: fn(ctx, params) {
+      val sid = params["sessionId"]
+      val conn = store.openDb()
+      defer { db.close(conn) }
+
+      val loaded = loadSessionOrThrow(conn, sid)
+      ctx.putSession(sid, {
+        id: sid,
+        cwd: loaded.session.repoRoot,
+        mode: :local,
+        knucklesId: sid,
+        session: loaded.session,
+      })
+      { sessionId: sid }
+    },
+
+    sessionPrompt: fn(ctx, params) {
+      val sid = params["sessionId"]
+      val entry = ctx.getSession(sid)
+      val prompt = params["prompt"] /> ifNil(params["content"] /> ifNil([]))
+      val message = firstPromptText(prompt)
+
+      val conn = store.openDb()
+      defer { db.close(conn) }
+
+      val createdOrLoaded = match entry["knucklesId"] {
+        nil => {
+          val created = store.createSession(
+            conn,
+            message,
+            entry["cwd"] /> ifNil("."),
+          )
+          { knucklesId: created.id, session: created.session }
+        }
+        kid => {
+          val baseSession = match entry["session"] {
+            nil => loadSessionOrThrow(conn, kid).session
+            s   => s
+          }
+          val nextSession = match message /> trim {
+            "" => baseSession
+            _  => {
+              val s2 = baseSession /> session.addHistory(:user, message)
+              store.appendTurn(conn, kid, s2.turn, :user, message)
+              store.saveSession(conn, kid, s2)
+              s2
+            }
+          }
+          { knucklesId: kid, session: nextSession }
+        }
+      }
+
+      val mode = detectMode(message, entry, createdOrLoaded.session)
+      val artifacts = agent.loadPromptArtifacts()
+      var activeToolCallId = nil
+
+      val finalSession = agent.runHarness(
+        conn,
+        createdOrLoaded.knucklesId,
+        createdOrLoaded.session,
+        artifacts.slugSpec,
+        artifacts.manifest,
+        mode,
+        {
+          onTurn: fn(s, action) { nil },
+          onThought: fn(s, thought, action) {
+            match thought /> trim {
+              "" => nil
+              t  => ctx.sendAgentText(sid, t)
+            }
+          },
+          onToolStart: fn(s, action) {
+            val tid = label(action.type) + "-" + randomHexString(4)
+            activeToolCallId = tid
+            ctx.sendToolCall(sid, tid, label(action.type), action.args)
+          },
+          onToolResult: fn(s, action, toolResult, patch) {
+            val tid = activeToolCallId /> ifNil(label(action.type) + "-" + randomHexString(4))
+            activeToolCallId = nil
+            val status = match toolResult.ok { true => "completed" false => "failed" }
+            ctx.sendToolResultText(sid, tid, status, fmt("{}", toolResult.output))
+          },
+          onDone: fn(s) {
+            ctx.sendAgentText(sid, format.formatSummary(s))
+          },
+          onLimit: fn(s, message) {
+            ctx.sendAgentText(sid, message)
+          },
+          onModelNil: fn(s) {
+            ctx.sendAgentText(sid, "Model returned no response. Retrying.")
+          },
+          ask: fn(question, s, action) {
+            nil
+          },
+        },
+      )
+
+      ctx.putSession(sid, {
+        id: sid,
+        cwd: finalSession.repoRoot,
+        mode: mode,
+        knucklesId: createdOrLoaded.knucklesId,
+        session: finalSession,
+      })
+
+      acp.endTurn()
+    },
+  }
+}
+
+@export
+val serve = fn(io = nil) {
+  runtime.run(handlers(), io)
+}
+
+@main
+val main = fn() {
+  serve()
 }

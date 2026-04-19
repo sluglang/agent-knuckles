@@ -111,13 +111,60 @@ val buildCommitMessage = fn(s) {
   }
 }
 
-val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
+val promptWithHook = fn(s, action, ask) {
+  val question = action.args["question"] /> ifNil("")
+  val answer = ask(question, s, action)
+  match answer {
+    nil => {
+      val msg = "no input received — session is running non-interactively"
+      val s2  = session.addResult(s, "prompt", false, msg)
+      { ok: false, output: msg, session: s2 }
+    }
+    _ => {
+      val fact = "Developer answered \"" + question + "\": " + answer
+      val out  = "Developer says: " + answer
+      val s2 = s
+        /> session.addFact(fact)
+        /> session.addResult("prompt", true, out)
+      { ok: true, output: out, session: s2 }
+    }
+  }
+}
+
+val dispatchTool = fn(s, action, valErr, ask) {
+  match valErr {
+    nil => match action.type == :prompt && ask != nil {
+      true => promptWithHook(s, action, ask)
+      false => tools.dispatch(s, action)
+    }
+    msg => {{ ok: false, output: msg, session: s }}
+  }
+}
+
+val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local, hooks = {}) {
+  val onTurn = hooks["onTurn"] /> ifNil(fn() {fn(s, action) { logTurn(s, action) }})
+  val onThought = hooks["onThought"] /> ifNil(fn() {fn(s, thought, action) { nil }})
+  val onToolStart = hooks["onToolStart"] /> ifNil(fn() {fn(s, action) { nil }})
+  val onToolResult = hooks["onToolResult"] /> ifNil(fn() {fn(s, action, toolResult, patch) { nil }})
+  val onDone = hooks["onDone"] /> ifNil(fn() {fn(s) {
+    println("")
+    println(format.formatSummary(s))
+  }})
+  val onLimit = hooks["onLimit"] /> ifNil(fn() {fn(s, message) {
+    println("⚠ " + message)
+  }})
+  val onModelNil = hooks["onModelNil"] /> ifNil(fn() {fn(s) {
+    println("✗ Model returned nil — retrying next turn")
+  }})
+  val ask = hooks["ask"]
+
   // turn limit guard
   match s.turn >= MAX_TURNS {
     true => {
-      val s2 = session.finish(s, "Turn limit reached (" + MAX_TURNS + "). Task incomplete.")
+      val limitMsg = "Turn limit reached (" + MAX_TURNS + "). Task incomplete."
+      val s2 = session.finish(s, limitMsg)
       store.saveSession(conn, id, s2)
-      println("⚠ Turn limit reached.")
+      onLimit(s2, limitMsg)
       s2
     }
     false => {
@@ -130,21 +177,22 @@ val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
       // handle model failure
       match response {
         nil => {
-          println("✗ Model returned nil — retrying next turn")
-                    val nilMsg = "<result tool=\"error\" status=\"error\">\nModel returned no response. Please try again.\n</r>"
+          onModelNil(s1)
+          val nilMsg = "<result tool=\"error\" status=\"error\">\nModel returned no response. Please try again.\n</r>"
           val s2 = s1 /> session.addHistory(:assistant, "[no response]")
           store.appendTurn(conn, id, s2.turn, :assistant, "[no response]")
           val s3 = s2 /> session.addHistory(:user, nilMsg)
           store.appendTurn(conn, id, s3.turn, :user, nilMsg)
           store.saveSession(conn, id, s3)
-          recur(conn, id, s3, slugSpec, manifest, mode)
+          recur(conn, id, s3, slugSpec, manifest, mode, hooks)
         }
         _ => {
           // parse and validate the action
           val action = parse.parseAction(response)
           val valErr = parse.validateAction(action)
 
-          logTurn(s1, action)
+          onThought(s1, action.thought, action)
+          onTurn(s1, action)
 
           // record the assistant turn — persist immediately
           val s2 = s1 /> session.addHistory(:assistant, response)
@@ -173,16 +221,17 @@ val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
               }
 
               store.saveSession(conn, id, s4)
-              println("")
-              println(format.formatSummary(s4))
+              onDone(s4)
               s4
             }
             _ => {
-              // validation error — feed back to model without dispatching
-              val toolResult = match valErr {
-                nil => tools.dispatch(s2, action)
-                msg => {{ ok: false, output: msg, session: s2 }}
+              onToolStart(s2, action)
+              val toolResult = dispatchTool(s2, action, valErr, ask)
+              val lastPatch = match action.type == :edit && toolResult.ok {
+                true => toolResult.session.patches[-1]
+                false => nil
               }
+              onToolResult(s2, action, toolResult, lastPatch)
 
               val resultMsg = format.formatResult({
                 tool:   label(action.type),
@@ -197,7 +246,7 @@ val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
               store.appendTurn(conn, id, s3.turn, :user, resultMsg)
               store.saveSession(conn, id, s3)
 
-              recur(conn, id, s3, slugSpec, manifest, mode)
+              recur(conn, id, s3, slugSpec, manifest, mode, hooks)
             }
           }
         }
@@ -207,6 +256,19 @@ val runLoop = fn(conn, id, s, slugSpec, manifest, mode = :local) {
 }
 
 // --- public entry points ---
+
+@export
+val loadPromptArtifacts = fn() {
+  {
+    slugSpec: loadSpec(SLUG_SPEC),
+    manifest: loadSpec(MANIFEST),
+  }
+}
+
+@export
+val runHarness = fn(conn, id, s, slugSpec, manifest, mode = :local, hooks = {}) {
+  runLoop(conn, id, s, slugSpec, manifest, mode, hooks)
+}
 
 /**
  * starts a new agent session for `goal` in `repoRoot`.
@@ -223,8 +285,9 @@ val run = fn(@str goal, @str repoRoot, mode = :local) {
   val conn     = store.openDb()
   defer { db.close(conn) }
 
-  val slugSpec = loadSpec(SLUG_SPEC)
-  val manifest = loadSpec(MANIFEST)
+  val artifacts = loadPromptArtifacts()
+  val slugSpec = artifacts.slugSpec
+  val manifest = artifacts.manifest
 
   val { id, session: s } = store.createSession(conn, goal, repoRoot)
 
@@ -234,7 +297,7 @@ val run = fn(@str goal, @str repoRoot, mode = :local) {
   println("  mode: " + label(mode))
   println("")
 
-  runLoop(conn, id, s, slugSpec, manifest, mode)
+  runLoop(conn, id, s, slugSpec, manifest, mode, {})
 }
 
 /**
@@ -252,8 +315,9 @@ val resume = fn(@str id, mode = :local) {
   val conn = store.openDb()
   defer { db.close(conn) }
 
-  val slugSpec = loadSpec(SLUG_SPEC)
-  val manifest = loadSpec(MANIFEST)
+  val artifacts = loadPromptArtifacts()
+  val slugSpec = artifacts.slugSpec
+  val manifest = artifacts.manifest
 
   match store.loadSession(conn, id) {
     nil => {
@@ -272,7 +336,7 @@ val resume = fn(@str id, mode = :local) {
           println("  goal: " + s.goal)
           println("  mode: " + label(mode))
           println("")
-          runLoop(conn, id, s, slugSpec, manifest, mode)
+          runLoop(conn, id, s, slugSpec, manifest, mode, {})
         }
       }
     }

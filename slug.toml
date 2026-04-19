@@ -28,5 +28,6 @@ knuckles-manifest = "__project__/data/MANIFEST.ai"
 knuckles-db = "__project__/data/knuckles.db"
 
 [slug.log]
-level = "debug"
 log-file = "__project__/knuckles.log"
+level = "info"
+level__slug_acp_runtime = "debug"
